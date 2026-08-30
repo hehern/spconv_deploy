@@ -52,7 +52,6 @@ cudaError_t CutlassSgemmNN(
   using WarpShape = cutlass::gemm::GemmShape<64, 64, 32>;
   using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
   constexpr int NumStages = 4;
-  // Alignment=2 (4字节) 是 sm_80 cp.async 的最小支持大小
   constexpr int AlignmentA = 8;
   constexpr int AlignmentB = 8;
   constexpr int AlignmentC = 8;

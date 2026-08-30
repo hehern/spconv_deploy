@@ -41,7 +41,13 @@ set(CUDA_NVCC_FLAGS_DEBUG   "-std=c++17 --expt-relaxed-constexpr --diag-suppress
 list(APPEND CUDA_NVCC_FLAGS_RELEASE -Xcompiler -Wno-unused-parameter -Xcompiler -Wno-error=unused-parameter)
 list(APPEND CUDA_NVCC_FLAGS_DEBUG   -Xcompiler -Wno-unused-parameter)
 
-set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} 
+# CUDA 架构: 优先使用环境变量 CUDASM (由 tool/environment.sh 自动探测本机 GPU),
+# 探测失败时给出明确报错, 避免拼出非法的 -gencode arch=compute_
+if(NOT DEFINED ENV{CUDASM} OR "$ENV{CUDASM}" STREQUAL "")
+  message(FATAL_ERROR "CUDASM is empty. Run 'source tool/environment.sh' first, or set CUDASM manually (e.g. 80/86/89).")
+endif()
+
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS}
   -gencode arch=compute_$ENV{CUDASM},code=compute_$ENV{CUDASM}
 )
 

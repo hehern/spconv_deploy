@@ -10,7 +10,7 @@
 #include <cuda_fp16.h>
 
 #include "spconv_ops.h"
-#include "ConvOutLocIter.h"
+#include "conv/ConvOutLocIter.h"
 #include "common/check.hpp"
 #include "common/timer.hpp"
 namespace spconv {
@@ -51,17 +51,17 @@ getIndicePairs(nv::Tensor indices,
   int64_t NDim = kernelSize.size();//3
   auto numAct = indices.shape[0];//type:long int
   auto coorDim = indices.shape[1] - 1; // batchIdx + xyz
-  TV_ASSERT_RT_ERR(NDim == coorDim, "error");
-  TV_ASSERT_RT_ERR(int64_t(kernelSize.size()) == coorDim, "error");
-  TV_ASSERT_RT_ERR(int64_t(outSpatialShape.size()) == coorDim, "error");
-  TV_ASSERT_RT_ERR(int64_t(stride.size()) == coorDim, "error");
-  TV_ASSERT_RT_ERR(int64_t(padding.size()) == coorDim, "error");
-  TV_ASSERT_RT_ERR(int64_t(dilation.size()) == coorDim, "error");
+  Asserts(NDim == coorDim, "error");
+  Asserts(int64_t(kernelSize.size()) == coorDim, "error");
+  Asserts(int64_t(outSpatialShape.size()) == coorDim, "error");
+  Asserts(int64_t(stride.size()) == coorDim, "error");
+  Asserts(int64_t(padding.size()) == coorDim, "error");
+  Asserts(int64_t(dilation.size()) == coorDim, "error");
   int64_t kernelVolume = kernelSize[0];
   for (size_t i = 1; i < kernelSize.size(); ++i) {
     kernelVolume *= kernelSize[i];
   }//27
-  TV_ASSERT_RT_ERR(kernelVolume <= 4096, "error");
+  Asserts(kernelVolume <= 4096, "error");
   auto outputVolume = outSpatialShape[0];
   for (size_t i = 1; i < outSpatialShape.size(); ++i) {
     outputVolume *= outSpatialShape[i];
@@ -69,7 +69,10 @@ getIndicePairs(nv::Tensor indices,
   std::string msg = "due to limits of cuda hash, the volume of dense space "
                     "include batch size ";
   msg += "must less than std::numeric_limits<int>::max() = 2e9";
-  TV_ASSERT_RT_ERR(outputVolume < std::numeric_limits<int64_t>::max(), msg);
+  if (!(outputVolume < std::numeric_limits<int64_t>::max())) {
+    fprintf(stderr, "Assert failed. outputVolume check in file %s:%d, message: %s\n", __FILE__, __LINE__, msg.c_str());
+    abort();
+  }
   nv::Tensor indicePairs = nv::Tensor::create(std::vector<int64_t>{2, kernelVolume, numAct}, nv::DataType::Int32);//shape:{2,27,n}
   // indicePairs.fill<int32_t>(-1);
   indicePairs.memset(0xFF, stream);
@@ -433,13 +436,18 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
   }
 }
 
+/*
+  indicePairs: shape:{27,n},就是rule_book，存储参与当前kernel位置卷积的active voxel的序号[0, numActIn-1]
+  pair_mask: shape:{n},每个active voxel都与kernel中的哪个元素进行卷积的mask
+  mask_argsort: shape:{n},对pair_mask进行排序，返回排序后的索引
+*/
 nv::Tensor
 implicit_gemm(nv::Tensor features, 
               nv::Tensor filters, //格式为eg:权重[16,3*3*3,5]，输出channel kernel_volume 输入channel
-              nv::Tensor pair_fwd, 
-              nv::Tensor pair_mask_fwd, 
-              nv::Tensor mask_argsort_fwd, 
-              int num_activate_out, 
+              nv::Tensor indicePairs, 
+              nv::Tensor pair_mask, 
+              nv::Tensor mask_argsort, 
+              int num_activate_out,
               bool is_subm, 
               void* stream) {
   
@@ -455,36 +463,8 @@ implicit_gemm(nv::Tensor features,
     out_features.memset(0, stream);
   }
 
-  nv::Tensor mask_output_fwd;
-  /*
-  conv_tuner.run_with_tuned_result(
-      tune_res,
-      kForwardInt,
-      features,
-      filters,
-      out_features,
-      pair_mask_fwd.type_view(tv::uint32),
-      mask_argsort_fwd,
-      mask_output_fwd,
-      pair_fwd,
-      false, // reverse_mask
-      mask_ptr[j],
-      -1, // mask_width
-      alpha, beta,
-      stream_int,
-      tv::Tensor(), // workspace
-      false, // verbose
-      timer, 
-      false,
-      bias,
-      act_alpha,
-      act_beta,
-      act_type,
-      scale,
-      output_add);
-
-  return std::make_tuple(mask_width, tune_res);
-  */
+  implicit_gemm_cuda(features, filters, indicePairs, pair_mask, mask_argsort, out_features, stream);
+  
  return out_features;
 }
 

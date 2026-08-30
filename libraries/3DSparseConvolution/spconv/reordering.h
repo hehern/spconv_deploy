@@ -42,6 +42,14 @@ void sparse_scatter_add_all_cuda(nv::Tensor& buffer, nv::Tensor& output,
 
 void addBiasAndRelu(nv::Tensor features, nv::Tensor bias,
                     bool Relu, void* stream);
+
+void implicit_gemm_cuda(nv::Tensor features,
+                        nv::Tensor filters,
+                        nv::Tensor pair_fwd,
+                        nv::Tensor pair_mask_fwd,
+                        nv::Tensor mask_argsort_fwd,
+                        nv::Tensor out_features,
+                        void* stream);
 } // namespace spconv
 
 #endif

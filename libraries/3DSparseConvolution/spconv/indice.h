@@ -15,7 +15,7 @@
 #ifndef SPARSE_CONV_INDICE_FUNCTOR_H_
 #define SPARSE_CONV_INDICE_FUNCTOR_H_
 #include "tensor.hpp"
-#include "ConvOutLocIter.h"
+#include "conv/ConvOutLocIter.h"
 
 namespace spconv {
 

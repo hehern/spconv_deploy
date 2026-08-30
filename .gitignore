@@ -1,3 +1,5 @@
 build
 .vscode
+*.csv
+*.ncu-rep
 # *.txt

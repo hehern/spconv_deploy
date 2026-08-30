@@ -16,7 +16,6 @@
 #define SPARSE_CONV_OP_H_
 
 #include "tensor.hpp"
-#include "tensorview/common.h"
 #include "indice.h"
 #include "reordering.h"
 

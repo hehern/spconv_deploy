@@ -21,7 +21,7 @@
 #include <limits>
 #include "common/launch.cuh"
 #include "tensor.hpp"
-#include "ConvOutLocIter.h"
+#include "conv/ConvOutLocIter.h"
 
 namespace spconv {
 
