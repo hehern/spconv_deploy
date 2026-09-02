@@ -37,6 +37,7 @@ void implicit_gemm_cuda(nv::Tensor features,
                         nv::Tensor mask_argsort_fwd,
                         nv::Tensor out_features,
                         void* stream) {
+    cudaStream_t _stream = static_cast<cudaStream_t>(stream);
     // 1. 提取维度信息
     int numActIn  = features.size(0);      // 输入有效点数
     int C         = features.size(1);      // 输入通道数
@@ -88,7 +89,7 @@ void implicit_gemm_cuda(nv::Tensor features,
 
     // 6. 配置 launch 参数
     // tile_shape = {64, 128, 32}, block = 128 threads, smem = 24576 bytes
-    dim3 grid  = ker_params.grid_dims;
+    dim3 grid  = ker_params.grid_dims;//(numActOut/64, outchannels/128, 1)
     dim3 block(128);
     int  smem_size = 24576;
 
@@ -105,7 +106,15 @@ void implicit_gemm_cuda(nv::Tensor features,
     }
 
     // 8. 启动 kernel (conv_kernel 定义在 reordering2.cu.h 中)
+    checkRuntime(cudaStreamSynchronize(_stream));
+    std::cout << "conv_kernel begin!" << std::endl;
+    std::cout << "numActIn: " << numActIn << std::endl;
+    std::cout << "numActOut: " << numActOut << std::endl;
+    std::cout << "conv_kernel grid dim: (" << grid.x << ", " << grid.y << ", " << grid.z << ")" << std::endl;
+    std::cout << "conv_kernel block dim: (" << block.x << ", " << block.y << ", " << block.z << ")" << std::endl;
     conv_kernel<<<grid, block, smem_size, reinterpret_cast<cudaStream_t>(stream)>>>(ker_params);
+    checkRuntime(cudaStreamSynchronize(_stream));
+    std::cout << "conv_kernel end!" << std::endl;
 
     cudaError_t result = cudaGetLastError();
     if (result != cudaSuccess) {

@@ -182,8 +182,8 @@ void judgeIndicesOutshape(nv::Tensor indices,
   填充indice_pairs以及indice_pair_mask
   in:
   indices:nv::Tensor, shape:{num_voxels:n, indices_dim:4},每个active voxel的坐标(batch,x,y,z)
-  hashdata_k:nv::Tensor, shape:{numAnum_voxels * 2}
-  hashdata_v:nv::Tensor, shape:{numAnum_voxels * 2}
+  hashdata_k:nv::Tensor, shape:{numAnum_voxels}
+  hashdata_v:nv::Tensor, shape:{numAnum_voxels}
   indice_pairs:nv::Tensor, shape:{kernelVolume, numActIn}
   indice_num_per_loc:nv::Tensor, shape:{kernelVolume},每个卷积核元素对应的有效voxel数量
   input_dims: eg:{720, 720, 21}
@@ -191,13 +191,16 @@ void judgeIndicesOutshape(nv::Tensor indices,
   dilation: eg:{1, 1, 1}
   indice_pair_mask:nv::Tensor, shape:{numActIn}
 */
-int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k, 
+int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k,
                             nv::Tensor hashdata_v, nv::Tensor indice_pairs,
-                            std::vector<int> input_dims, std::vector<int> ksize, 
-                            nv::Tensor indice_pair_mask, 
+                            std::vector<int> input_dims, std::vector<int> ksize,
+                            nv::Tensor indice_pair_mask,
                             ConvOutLocIter& loc_iter, void* stream) {
-  
+
   int numActIn = indices.shape[0];
+  if (numActIn == 0) {
+    return 0;
+  }
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
 
   int kv = std::accumulate(ksize.begin(), ksize.end(), 1, std::multiplies<int>());
@@ -212,26 +215,32 @@ int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k,
   int* inSpatialShape_ptr = ou.ptr<int>();//size:xyz
   
   cuda_linear_launch(buildSubmConvHashTable, _stream, numActIn, indicesIn_ptr, hashdata_k_ptr, hashdata_v_ptr, inSpatialShape_ptr);//计算Hash_out：建立输出张量坐标(通过index表示)到输出序号之间的一张哈希表
-
+  // checkRuntime(cudaStreamSynchronize(_stream));
+  // std::cout << "buildSubmConvHashTable!" << std::endl;
   uint32_t* indice_pair_mask_ptr = indice_pair_mask.ptr<uint32_t>();
   cuda_linear_launch(fill_kernel<uint32_t>, _stream, numActIn, indice_pair_mask_ptr, 1 << (kv / 2));//每个active voxel都与kernel中心位置参与卷积，所以初始化1<<13
-  
+  // checkRuntime(cudaStreamSynchronize(_stream));
+  // std::cout << "fill_kernel!" << std::endl;
   dim3 __threads__(std::min(numActIn, 1024));
   dim3 __blocks__(divup(numActIn, std::min(numActIn, 1024)), (kv / 2) + 1);
   calc_subm_conv_indices_mask<<<__blocks__, __threads__, 0, _stream>>>(hashdata_k_ptr, hashdata_v_ptr, indicesIn_ptr,
         indice_pairs_ptr, indice_pair_mask_ptr, numActIn, kv, (kv / 2) + 1, loc_iter);
-
+  // checkRuntime(cudaStreamSynchronize(_stream));
+  // std::cout << "calc_subm_conv_indices_mask!" << std::endl;
   return indices.shape[0];
 }
 
-nv::Tensor sort_1d_by_key_allocator_v2(nv::Tensor data, 
+nv::Tensor sort_1d_by_key_allocator_v2(nv::Tensor data,
                                        nv::Tensor indices,
                                        void* stream) {
-  
+
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
 
-  int numActIn = indices.shape[1];
-  int* indicesIn_ptr = indices.ptr<int>();
+  int numActIn = indices.numel;
+  if (numActIn == 0) {
+    return indices;
+  }
+  int32_t* indicesIn_ptr = indices.ptr<int32_t>();
   uint32_t* data_ptr = data.ptr<uint32_t>();
   cuda_linear_launch(arange_kernel<int32_t>, _stream, numActIn, indicesIn_ptr);//0-numActIn-1
 
@@ -251,6 +260,9 @@ void generate_conv_inds_mask_stage1(nv::Tensor indices,
   
   int kv = std::accumulate(ksize.begin(), ksize.end(), 1, std::multiplies<int>());
   int num_act_in = indices.shape[0];
+  if (num_act_in == 0) {
+    return;
+  }
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
 
   int64_t uniq_size = indice_pairs_uniq.shape[0];
@@ -266,22 +278,25 @@ void generate_conv_inds_mask_stage1(nv::Tensor indices,
     indice_pairs_uniq_ptr, num_act_in, kv, loc_iter);
 }
 
-int generate_conv_inds_mask_stage2(nv::Tensor indices, 
-                                   nv::Tensor hashdata_k, 
-                                   nv::Tensor hashdata_v, 
+int generate_conv_inds_mask_stage2(nv::Tensor indices,
+                                   nv::Tensor hashdata_k,
+                                   nv::Tensor hashdata_v,
                                    nv::Tensor indice_pairs,
-                                   nv::Tensor indice_pairs_uniq, 
-                                   nv::Tensor indice_pairs_uniq_before_sort, 
-                                   nv::Tensor out_inds, 
+                                   nv::Tensor indice_pairs_uniq,
+                                   nv::Tensor indice_pairs_uniq_before_sort,
+                                   nv::Tensor out_inds,
                                    nv::Tensor mask_fwd,
                                    int num_out_act,
-                                   std::vector<int> ksize, 
+                                   std::vector<int> ksize,
                                    ConvOutLocIter& loc_iter,
                                    void* stream) {
-  
+
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
 
   int num_act_in = indices.shape[0];
+  if (num_act_in == 0 || num_out_act == 0) {
+    return num_out_act;
+  }
   int* hashdata_k_ptr = hashdata_k.ptr<int>();
   int* hashdata_v_ptr = hashdata_v.ptr<int>();
   int* indice_pairs_ptr = indice_pairs.ptr<int>();

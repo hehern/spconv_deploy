@@ -4,7 +4,6 @@
 namespace cumm {
 namespace conv {
 
-using ThreadMap = Out5DLinear;
 struct OutIteratorParams {
   int64_t stride;
   int64_t increment_row;
@@ -20,8 +19,8 @@ struct OutIteratorParams {
   }
   __forceinline__ __host__ __device__  OutIteratorParams(int stride_, const int* indice_ptr = nullptr) : stride(stride_), indice_ptr_(indice_ptr)  {
     
-    auto increment_params = ThreadMap::iteration_inc_params(stride);
-    auto advance_params = ThreadMap::iteration_advance_params(stride);
+    auto increment_params = Out5DLinear::iteration_inc_params(stride);
+    auto advance_params = Out5DLinear::iteration_advance_params(stride);
     increment_cluster = increment_params[0];
     increment_group = increment_params[1];
     increment_row = increment_params[2];

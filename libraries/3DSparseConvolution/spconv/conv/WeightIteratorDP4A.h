@@ -27,7 +27,9 @@ struct WeightIteratorDP4A {
     // thread_offset = threadblock_offset + ThreadMap::initial_offset(thread_id)
     std::array<int, 2> thread_offset{threadblock_offset[0] + tmap_offset[0],
                                      threadblock_offset[1] + tmap_offset[1]};
-    mask_.fill(0);
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 1; ++i) mask_[i] = 0;
     reduce_channel_offset_ = thread_offset[0];
     reduce_channel_offset_backup_ = thread_offset[0];
     #pragma unroll
@@ -122,7 +124,9 @@ struct WeightIteratorDP4A {
   }
   __forceinline__ __device__ void load_with_pointer_offset(std::array<half, 32>& frag, int32_t pointer_offset)   {
 
-    frag.fill(half{});
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) frag[i] = half{};
     std::array<half, 8> *frag_ptr = reinterpret_cast<std::array<half, 8> *>(&frag);
     #pragma unroll
     for (int s = 0; s < 2; ++s){

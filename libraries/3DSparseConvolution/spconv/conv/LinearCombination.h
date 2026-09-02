@@ -20,15 +20,26 @@ struct UnaryActivation {
         case Activation::kReLU:{
             #pragma unroll
             for (int i = 0; i < 8; ++i){
-                res[i] = src[i] >= half{0} ? src[i] : half{0};
+                // CUDA 11.8 中 half 没有 half>=half 的精确定义, 需转换到 float 比较;
+                // half 三元表达式公共类型计算同样歧义 (多个隐式转换), 统一改用 float + if/else
+                if (__half2float(src[i]) >= 0.0f) {
+                    res[i] = src[i];
+                } else {
+                    res[i] = half{0};
+                }
             }
             return res;
         }
         case Activation::kLeakyReLU:{
             #pragma unroll
             for (int i = 0; i < 8; ++i){
-                auto x = src[i];
-                res[i] = x >= half{0} ? x : __float2half(__half2float(x) * alpha);
+                // 同上: half 之间 >= 比较与三元表达式均歧义, 转 float 处理
+                float x = __half2float(src[i]);
+                if (x >= 0.0f) {
+                    res[i] = src[i];
+                } else {
+                    res[i] = __float2half(x * alpha);
+                }
             }
             return res;
         }
@@ -57,7 +68,8 @@ struct LinearCombination {
 
   }
   __forceinline__ __device__ bool is_source_needed()  const {
-    return  beta != half{0};
+    // half 之间 != 比较歧义, 转 float 比较
+    return __half2float(beta) != 0.0f;
   }
   __forceinline__ __device__ void set_k_partition(int k_part, int k_part_count)   {
 

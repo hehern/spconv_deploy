@@ -30,7 +30,6 @@ struct aligned_array {
     TV_HOST_DEVICE_INLINE const T* end() const { return data + N; }
     TV_HOST_DEVICE_INLINE constexpr std::size_t size() const { return N; }
     TV_HOST_DEVICE_INLINE void fill(const T& v) {
-        #pragma unroll
         for (std::size_t i = 0; i < N; ++i) data[i] = v;
     }
     TV_HOST_DEVICE_INLINE void clear() { fill(T{}); }

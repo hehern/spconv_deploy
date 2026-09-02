@@ -200,7 +200,9 @@ struct Output {
       return run_no_source(output_op, accumulators, out_iter);
     }
     std::array<half, 16> source_frag;
-    source_frag.fill(half{});
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) source_frag[i] = half{};
     FragIter out_acc_iter(accumulators.data());
     #pragma unroll
     for (int iter = 0; iter < 4; iter += 1){
@@ -266,7 +268,9 @@ struct Output {
   __forceinline__ __device__ void run_self_reduce(OutputOp const& output_op, std::array<half, 64> const& accumulators, OutIter& out_iter)   {
 
     std::array<half, 16> source_frag;
-    source_frag.fill(half{});
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) source_frag[i] = half{};
     FragIter out_acc_iter(accumulators.data());
     #pragma unroll
     for (int iter = 0; iter < 4; iter += 1){

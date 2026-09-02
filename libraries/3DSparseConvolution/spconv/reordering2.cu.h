@@ -82,6 +82,7 @@ __global__ void conv_kernel(ConvParams params) {
     int tile_offset_m = blockIdx.x;
     int tile_offset_n = blockIdx.y;
     int tile_offset_k = blockIdx.z;
+    printf("blockIdx.x: %d, blockIdx.y: %d, blockIdx.z: %d\n", blockIdx.x, blockIdx.y, blockIdx.z);
     if (tile_offset_m >= params.grid_dims.x ||
         tile_offset_n >= params.grid_dims.y) {
         return;
@@ -115,7 +116,9 @@ __global__ void conv_kernel(ConvParams params) {
     // 5. Mask 加载与 Warp 归约 (稀疏跳过核心逻辑)
     uint32_t kmask = 0;
     std::array<uint32_t, 2> masks;
-    masks.fill(0);
+    // std::array::fill 在 CUDA 11.8 是 __host__ 函数, 设备端需用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) masks[i] = 0;
     #pragma unroll
     for (int i = 0; i < 2; ++i){
         if (tile_offset_m * 64 + i * 32 + lane_idx < params.m){
@@ -142,7 +145,9 @@ __global__ void conv_kernel(ConvParams params) {
     MmaMultiStage mma(gemm_shared_mem, thread_idx, warp_idx_k,
                           warp_m, warp_n, lane_idx);
     std::array<half, 64> accumulators;
-    accumulators.fill(half{});
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 64; ++i) accumulators[i] = half{};
     if (!kSplitKSerial || params.gemm_k_iterations > 0){
         mma(params.gemm_k_iterations, accumulators,
             input_iter_A, input_iter_B, accumulators,

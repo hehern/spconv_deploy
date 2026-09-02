@@ -27,6 +27,7 @@ struct PitchLinearWarpRaked {
     return {offset_in_tile[0], offset_in_tile[1] * 8};
   }
 };
+} // namespace tmap
 } // namespace inpitera
 } // namespace conv
 } // namespace cumm

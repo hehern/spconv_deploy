@@ -12,7 +12,8 @@ struct Mask {
   }
   __forceinline__ __host__ __device__ void clear()   {
     
-    mask_.fill(0);
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    for (int i = 0; i < 1; ++i) mask_[i] = 0;
   }
   __forceinline__ __host__ __device__ uint32_t query(int idx)  const {
     

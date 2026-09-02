@@ -60,5 +60,14 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
                            bool subm,
                            void* stream);
 
+nv::Tensor
+implicit_gemm(nv::Tensor features, 
+              nv::Tensor filters, //格式为eg:权重[16,3*3*3,5]，输出channel kernel_volume 输入channel
+              nv::Tensor indicePairs, 
+              nv::Tensor pair_mask, 
+              nv::Tensor mask_argsort, 
+              int num_activate_out,
+              bool is_subm, 
+              void* stream);
 } // namespace spconv
 #endif

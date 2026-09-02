@@ -356,7 +356,7 @@ __global__ void fill_kernel(size_t numActIn, T* data, T val)   {
 __global__ void calc_subm_conv_indices_mask(const int* hashdata_k, const int* hashdata_v,
                                             const int* indices_in, int32_t* indice_pairs, 
                                             uint32_t* mask, int num_indices, int RS, int RS_half,
-                                            ConvOutLocIter& loc_iter) {
+                                            ConvOutLocIter loc_iter) {
   
   int ix = cuda_2d_x;
   int iy = cuda_2d_y;
@@ -369,6 +369,7 @@ __global__ void calc_subm_conv_indices_mask(const int* hashdata_k, const int* ha
 
   int filter_offset_mul_indices_pair_size = filter_offset * num_indices;
   int filter_offset_mul_indices_pair_size_1 = (RS - 1 - filter_offset) * num_indices;
+  // printf("ix:%d, iy:%d, num_indices:%d\n", ix, iy, num_indices);
   if (filter_offset == (RS / 2)){//kernel中心位置
     indice_pairs[filter_offset_mul_indices_pair_size + ix] = ix;
   } else {
@@ -382,6 +383,10 @@ __global__ void calc_subm_conv_indices_mask(const int* hashdata_k, const int* ha
       }
       if (table_offset < num_indices) {//找到的情况下
         auto input_index = hashdata_v[table_offset]; // we find a input indice idx.
+        // if (input_index >= num_indices) {
+        //   printf("input_index:%d, num_indices:%d\n", input_index, num_indices);
+        //   assert(0);
+        // }
         atomicOr(mask + ix, filter_mask_out);//或操作，将当前对应的mask位置与当前kernel_mask进行或操作
         atomicOr(mask + input_index, filter_mask_in);
         // for this output, we set correct input idx.
@@ -414,7 +419,7 @@ __global__ void clean_indices_uniq(size_t size, T* indice_pairs_for_uniq)   {
 __global__ void calc_conv_indices_stage1_mask(const int* indices_in, 
                                               int32_t* indice_pairs_for_uniq, 
                                               int num_indices_in, int RS,
-                                              ConvOutLocIter& loc_iter) {
+                                              ConvOutLocIter loc_iter) {
   
   int ix = cuda_2d_x;
   int iy = cuda_2d_y;
@@ -435,7 +440,7 @@ __global__ void calc_conv_indices_stage1_mask(const int* indices_in,
 __global__ void build_conv_hash_table(size_t numAct,
                                       int* hashdata_k, int* hashdata_v,
                                       int* indices_out, int* indice_pairs_for_uniq, 
-                                      ConvOutLocIter& loc_iter) {
+                                      ConvOutLocIter loc_iter) {
   int ix = cuda_linear_index;
   if (ix >= numAct) return;
 

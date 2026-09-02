@@ -81,7 +81,9 @@ struct MaskIGemmIteratorMaskLoaderDynamic {
 
     current_mask = 0;
     std::array<uint32_t, 2> masks;
-    masks.fill(0);
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) masks[i] = 0;
     #pragma unroll
     for (int i = 0; i < 2; ++i){
         if (tile_offset_m * 64 + i * 32 + lane_idx < problem_m){

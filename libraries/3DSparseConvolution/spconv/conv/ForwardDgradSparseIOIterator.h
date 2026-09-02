@@ -33,7 +33,9 @@ struct ForwardDgradSparseIOIterator {
     int stride_offset_ = thread_offset[0];
     pointer_ = reinterpret_cast<const char *>(ptr + thread_offset[1]);
     params.mask_argsort_ptr_ += stride_offset_;
-    mask_.fill(0);
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 1; ++i) mask_[i] = 0;
     reduce_channel_offset_ = thread_offset[1];
     reduce_channel_offset_backup_ = thread_offset[1];
     #pragma unroll
@@ -49,7 +51,8 @@ struct ForwardDgradSparseIOIterator {
     }
     #pragma unroll
     for (int v = 0; v < 1; ++v){
-        mask_[v] = thread_offset[1] + v * 8 >= problem_.K ? 0 : mask_[v];
+        // 前向卷积: A 操作数是输入 features, 每行 C 个通道; 通道边界按 problem_.C 判断
+        mask_[v] = thread_offset[1] + v * 8 >= problem_.C ? 0 : mask_[v];
     }
     mask_reset_backup_ = mask_;
   }
@@ -82,9 +85,10 @@ struct ForwardDgradSparseIOIterator {
         #pragma unroll
         for (int ss = 0; ss < 1; ++ss){
             if (mask_[0] & (1u << (s * 1 + ss))){
+                // 前向卷积: A 行偏移 = 输入voxel索引 * C(输入通道) * 2字节
                 indices_[s * 1 + ss] =
                 indice_ptr_[mask_inds[s * 1 + ss]] *
-                    problem_.K * 2 ;
+                    problem_.C * 2 ;
             }
         }
     }
@@ -129,7 +133,8 @@ struct ForwardDgradSparseIOIterator {
     reduce_channel_offset_ += params_.filter_c_delta;
     #pragma unroll
     for (int v = 0; v < 1; ++v){
-        clear_mask_if_pred(reduce_channel_offset_ + v * 8 >= problem_.K, v);
+        // 前向卷积: A 通道边界按 problem_.C 判断
+        clear_mask_if_pred(reduce_channel_offset_ + v * 8 >= problem_.C, v);
     }
   }
   __forceinline__ __device__ void increment_filter()   {
@@ -156,7 +161,9 @@ struct ForwardDgradSparseIOIterator {
   }
   __forceinline__ __device__ void load_with_pointer_offset(std::array<half, 16>& frag, int32_t pointer_offset)   {
 
-    frag.fill(half{});
+    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) frag[i] = half{};
     aligned_array<int4, 1, 16> *frag_ptr = reinterpret_cast<aligned_array<int4, 1, 16> *>(&frag);
     #pragma unroll
     for (int s = 0; s < 2; ++s){
