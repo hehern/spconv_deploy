@@ -18,9 +18,14 @@
 
 namespace spconv {
 
-// Ampere 架构 f16 稀疏卷积 Tensor Core kernel
-// 对应 spconv 中 L489-L561 的调度逻辑:
-//   Ampere_f16f16f16f16f16ttt_m64n128k32m32n64k32A1T1688_200_C311LLL_SK
+// Ampere 架构 f16 稀疏卷积 Tensor Core kernel (tnt C301, kForward 前向卷积)
+// 对应 spconv 中 L1763-L1809 的调度逻辑:
+//   Ampere_f16f16f16f16f16tnt_m64n128k32m32n64k32A1T1688_200_C301LLL_SK
+//
+// GEMM 公式 (前向): out[m, k] = sum_c in[gather(m,kv), c] * w[k, kv, c]
+//   A = 输入特征 (numActIn, C), gather stride = C
+//   B = 权重 (K, KV, C) 的转置切片
+//   输出行宽 = K
 //
 // 参数说明:
 //   features:        (numActIn, C)       输入特征
@@ -68,11 +73,12 @@ void implicit_gemm_cuda(nv::Tensor features,
     const int*      indice_ptr       = pair_fwd.ptr<int>();
 
     // 5. 创建 ConvParams (构造函数内部完成 grid_dims/gemm_k_iterations/迭代器参数初始化)
+    // tnt(kForward): 构造函数含 mask_out_ptr 参数 (推理传 nullptr)
     ConvParams ker_params(
         problem,
-        ptr_A,             // 输入特征
-        ptr_B,             // 卷积权重
-        ptr_C,             // 输出
+        ptr_A,             // 输入特征 (numActIn, C)
+        ptr_B,             // 卷积权重 (K, KV, C)
+        ptr_C,             // 输出 (numActOut, K)
         ptr_D,             // source (beta=0 时不使用)
         mask_ptr,          // per-point mask 数据
         mask_argsort_ptr,  // mask argsort 索引

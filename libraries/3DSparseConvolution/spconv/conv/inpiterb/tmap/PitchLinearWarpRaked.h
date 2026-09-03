@@ -18,9 +18,10 @@ struct PitchLinearWarpRaked {
     int lane_id = (thread_id % 32);
     std::array<int, 2> warp_offset{warp_id / 1,
                                 warp_id % 1};
-    constexpr std::array<int, 2> kWarpDilation{8, 16};
-    std::array<int, 2> thread_offset_in_warp{lane_id / 8,
-                                            lane_id % 8};
+    // tnt(kForward): warp dilation {32, 4}, lane 映射 lane_id/4, lane_id%4
+    constexpr std::array<int, 2> kWarpDilation{32, 4};
+    std::array<int, 2> thread_offset_in_warp{lane_id / 4,
+                                            lane_id % 4};
     // offset_in_tile = kWarpDilation * warp_offset + thread_offset_in_warp
     std::array<int, 2> offset_in_tile;
     offset_in_tile[0] = kWarpDilation[0] * warp_offset[0] + thread_offset_in_warp[0];

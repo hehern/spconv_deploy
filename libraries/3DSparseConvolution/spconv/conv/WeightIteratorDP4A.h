@@ -30,22 +30,26 @@ struct WeightIteratorDP4A {
     // std::array::fill 是 __host__ 函数, 设备端用循环初始化
     #pragma unroll
     for (int i = 0; i < 1; ++i) mask_[i] = 0;
-    reduce_channel_offset_ = thread_offset[0];
-    reduce_channel_offset_backup_ = thread_offset[0];
+    // tnt(kForward): 归约维在 thread_offset[1] (C 方向), N 维在 thread_offset[0] (K 方向)
+    reduce_channel_offset_ = thread_offset[1];
+    reduce_channel_offset_backup_ = thread_offset[1];
     #pragma unroll
-    for (int s = 0; s < 2; ++s){
+    for (int s = 0; s < 4; ++s){
       #pragma unroll
-      for (int c = 0; c < 2; ++c){
+      for (int c = 0; c < 1; ++c){
         #pragma unroll
         for (int ss = 0; ss < 1; ++ss){
           #pragma unroll
           for (int v = 0; v < 1; ++v){
-            uint32_t pred = (thread_offset[0] + s * 4 + ss < problem_size.K)
-                && (thread_offset[1] + c * 64 + v * 8 < problem_size.C);
-            mask_[v] |= (pred << (s * 2 + c * 1 + ss));
+            uint32_t pred = thread_offset[0] + s * 8 + ss < problem_size.K;
+            mask_[v] |= (pred << (s * 1 + c * 1 + ss));
           }
         }
       }
+    }
+    #pragma unroll
+    for (int v = 0; v < 1; ++v){
+        mask_[v] = thread_offset[1] + v * 8 >= problem_size.C ? 0 : mask_[v];
     }
     pointer_ += (thread_offset[0] * params.layout.strides[0] + thread_offset[1]) * 16 / 8;
     mask_backup_ = mask_;
@@ -58,17 +62,8 @@ struct WeightIteratorDP4A {
     pointer_ += params_.inc_c;
     reduce_channel_offset_ += params_.filter_c_delta;
     #pragma unroll
-    for (int s = 0; s < 2; ++s){
-      #pragma unroll
-      for (int ss = 0; ss < 1; ++ss){
-        if (reduce_channel_offset_ + s * 4 + ss >= problem_size_.K){
-            uint32_t mask = ((1u << 2) - 1) << (s * 2 + ss);
-            #pragma unroll
-            for (int v = 0; v < 1; ++v){
-                mask_[v] = mask_[v] & (~mask);
-            }
-        }
-      }
+    for (int v = 0; v < 1; ++v){
+        clear_mask_if_pred(reduce_channel_offset_ + v * 8 >= problem_size_.C, v);
     }
   }
   __forceinline__ __device__ void increment_filter()   {
@@ -116,11 +111,11 @@ struct WeightIteratorDP4A {
   }
   __forceinline__ __device__ bool valid(int s, int c, int ss, int v)  const {
 
-    return mask_[v] & (1u << (s * 2 + c * 1 + ss));
+    return mask_[v] & (1u << (s * 1 + c * 1 + ss));
   }
   __forceinline__ __device__ const std::array<half, 8> * get(int stride, int contig, int ss)  const {
 
-    return reinterpret_cast<const std::array<half, 8> *>(pointer_ + contig * 64 * 16 / 8);
+    return reinterpret_cast<const std::array<half, 8> *>(pointer_ + contig * 32 * 16 / 8);
   }
   __forceinline__ __device__ void load_with_pointer_offset(std::array<half, 32>& frag, int32_t pointer_offset)   {
 
@@ -129,21 +124,21 @@ struct WeightIteratorDP4A {
     for (int i = 0; i < 32; ++i) frag[i] = half{};
     std::array<half, 8> *frag_ptr = reinterpret_cast<std::array<half, 8> *>(&frag);
     #pragma unroll
-    for (int s = 0; s < 2; ++s){
+    for (int s = 0; s < 4; ++s){
       #pragma unroll
-      for (int c = 0; c < 2; ++c){
+      for (int c = 0; c < 1; ++c){
         #pragma unroll
         for (int ss = 0; ss < 1; ++ss){
           #pragma unroll
           for (int v = 0; v < 1; ++v){
-            int idx = s * 2 +
+            int idx = s * 1 +
                 c * 1 + ss * 1 + v;
             std::array<half, 8> const *access_ptr = get(s, c, ss) + v + pointer_offset / 8;
             BGlobalLoad::run(frag_ptr[idx], access_ptr, valid(s, c, ss, v));
           }
         }
       }
-      if (s != 1){
+      if (s != 3){
           pointer_ += params_.inc_strided;
       }
     }
@@ -152,15 +147,15 @@ struct WeightIteratorDP4A {
 
     std::array<half, 8> const *access_ptr = get(s, c, 0) + 0;
     valid_ref = valid(s, c, 0, 0);
-    if (c == 1 && s != 1)
+    if (c == 0 && s != 3)
         pointer_ += params_.inc_strided;
     return access_ptr;
   }
   __forceinline__ __device__ void load_invalid()   {
 
     #pragma unroll
-    for (int s = 0; s < 2; ++s){
-      if (s != 1){
+    for (int s = 0; s < 4; ++s){
+      if (s != 3){
           pointer_ += params_.inc_strided;
       }
     }

@@ -18,18 +18,19 @@ struct WeightOptParams {
     
     // int kernel_prod = problem.kernel_volume;
     filter_c_delta = 32 * problem.split_k_slices;
-    inc_strided = int64_t(layout.strides[0]) * 4;
+    // tnt(kForward): inc_strided 为 8 个 stride[0] (B 按 K 维 stride 访问, 每 8 个 K 一组)
+    inc_strided = int64_t(layout.strides[0]) * 8;
     stride_rsc_bytes = layout.strides[0] * 16 / 8;
     // back to strided start, then inc c
-    inc_c = filter_c_delta * layout.strides[0] - inc_strided * int64_t(1);
+    inc_c = filter_c_delta - inc_strided * int64_t(3);
     inc_rs = int64_t(layout.strides[1]);
-    // inc_c_reset = -gemm_iters_k * filter_c_delta * layout.strides[0] * 16 / 8;
+    // inc_c_reset = -gemm_iters_k * filter_c_delta * 16 / 8;
     inc_rs = inc_rs * 16 / 8;
     inc_strided = inc_strided * 16 / 8;
     inc_c = inc_c * 16 / 8;
   }
   __forceinline__ __host__ __device__ void set_inc_reset_for_inc_k_first(int gemm_iters_k = -1)   {
-    
+
     inc_c_reset = -gemm_iters_k * filter_c_delta * layout.strides[0] * 16 / 8;
   }
 };

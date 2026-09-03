@@ -55,7 +55,7 @@ using cumm::conv::Output;
 
 /*
     ===== conv_kernel 完整实现 =====
-    搬运自: cumm/conv/main/Ampere_f16f16f16f16f16ttt_m64n128k32m32n64k32A1T1688_200_C311LLL_SK/ConvKernel/ConvKernel_conv_kernel.cu
+    搬运自: cumm/conv/main/Ampere_f16f16f16f16f16tnt_m64n128k32m32n64k32A1T1688_200_C301LLL_SK/ConvKernel/ConvKernel_conv_kernel.cu
     tile_shape = {64, 128, 32}, warp_tile = {32, 64, 32}, m为2, n为2, 所以一个block启动4个warp
     num_stage = 2, tensorop = m16n8k8, mask_sparse = true, Block (128 threads = 4 warps)
     warp分解：
@@ -89,14 +89,16 @@ __global__ void conv_kernel(ConvParams params) {
     }
 
     // 2. 计算 block 在 A/B 矩阵中的偏移
-    //    A(tile 64x32), B(tile 32x128)
+    //    A tile: 64 x 32 (M x C_reduction), 从 (numActIn, C) 输入特征 gather
+    //    B tile: 128 x 32 (N x C_reduction) ← tnt: B 偏移是 {n, k}!
+    //            (B = w^T 即 C x K 布局; ttt dgrad 是 {k, n})
     std::array<int, 2> block_offset_A{tile_offset_m * 64, tile_offset_k * 32};
-    std::array<int, 2> block_offset_B{tile_offset_k * 32, tile_offset_n * 128};
+    std::array<int, 2> block_offset_B{tile_offset_n * 128, tile_offset_k * 32};
     int thread_idx = threadIdx.x;
 
     // 3. 初始化稀疏输入迭代器
-    //    InputIteratorA: 通过 mask+argsort 从 global memory 加载输入特征
-    //    InputIteratorB: 加载卷积权重
+    //    InputIteratorA: 通过 mask+argsort 从 (numActIn, C) 输入特征 gather
+    //    InputIteratorB: 读取权重 w[k, kv, c] 的转置切片
     ForwardDgradSparseIOIterator input_iter_A(
         params.itera_params_, params.problem, params.ptr_A,
         thread_idx, block_offset_A);
@@ -136,12 +138,9 @@ __global__ void conv_kernel(ConvParams params) {
     }
     // 与 mask_filter 做与运算 (选择当前 split 对应的 kernel 位置)
     kmask &= params.mask_filter;
-    // 如果该 block 完全没有有效数据, 直接跳过
-    if (kmask == 0){
-        return;
-    }
 
     // 6. MMA 计算 (Tensor Core)
+    //    tnt: kmask==0 时不提前 return (epilogue 仍需写0到输出)
     MmaMultiStage mma(gemm_shared_mem, thread_idx, warp_idx_k,
                           warp_m, warp_n, lane_idx);
     std::array<half, 64> accumulators;
@@ -149,9 +148,11 @@ __global__ void conv_kernel(ConvParams params) {
     #pragma unroll
     for (int i = 0; i < 64; ++i) accumulators[i] = half{};
     if (!kSplitKSerial || params.gemm_k_iterations > 0){
-        mma(params.gemm_k_iterations, accumulators,
-            input_iter_A, input_iter_B, accumulators,
-            kmask, params.problem.kernel_volume);
+        if (kmask != 0){
+            mma(params.gemm_k_iterations, accumulators,
+                input_iter_A, input_iter_B, accumulators,
+                kmask, params.problem.kernel_volume);
+        }
     }
 
     // 7. Epilogue: D = alpha * A@B + beta * D + activation

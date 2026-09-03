@@ -103,15 +103,7 @@ struct MaskIGemmIteratorMaskLoaderDynamic {
   }
   __device__ inline void init_mask_iter(const bool& save = false)   {
 
-    if (reverse){
-        int used_mask = div_up(RS, 32);
-        mask_load_idx = used_mask - 1;
-        RS_pos = 0;
-        RS_offset = used_mask * 32 - RS;
-        load_mask(save);
-        current_mask = __brev(current_mask);
-        return;
-    }
+    // tnt(kForward): 无 reverse 分支 (ttt dgrad 才需要反转 mask)
     mask_load_idx = 0;
     RS_pos = RS_offset = 0;
     load_mask(save);
@@ -123,16 +115,8 @@ struct MaskIGemmIteratorMaskLoaderDynamic {
       return;
     }
     if ((RS_pos + RS_offset) % 32 == 0){
-      if (reverse){
-        --mask_load_idx;
-      }
-      else{
-        ++mask_load_idx;
-      }
+      ++mask_load_idx;
       load_mask();
-      if (reverse){
-        current_mask = __brev(current_mask);
-      }
     }
   }
   __device__ inline bool valid()   {
@@ -209,7 +193,8 @@ struct MyTensorOpLayout {
 } // namespace layout
 } // namespace mma_ns_wa
 
-// ===== mma_ns_wb/layout/MyTensorOpLayout (congruous) =====
+// ===== mma_ns_wb/layout/MyTensorOpLayout (crosswise, tnt kForward 版) =====
+// tnt(kForward): B 操作数也使用 crosswise 布局 (ttt dgrad 用 congruous)
 namespace mma_ns_wb {
 namespace layout {
 struct MyTensorOpLayout {
@@ -222,17 +207,17 @@ struct MyTensorOpLayout {
   __forceinline__ __host__ __device__ constexpr int64_t operator()(int32_t s, int32_t ec)  const {
 
     int vc = ec / 8;
-    int interleaved_s = s / 1;
-    int idx_in_interleave_s = s % 1;
-    int sw_idx_c = vc / 8;
-    int idx_in_sw_c = vc % 8 + idx_in_interleave_s * 8;
-    int idx_in_sw_s = interleaved_s % 8;
+    int interleaved_s = s / 2;
+    int idx_in_interleave_s = s % 2;
+    int sw_idx_c = vc / 4;
+    int idx_in_sw_c = vc % 4 + idx_in_interleave_s * 4;
+    int idx_in_sw_s = interleaved_s % 4;
     int subsw_idx_s = idx_in_sw_s / 4;
     int subsw_idx_c = idx_in_sw_c / 4;
     int idx_in_subsw_s = idx_in_sw_s % 4;
     int idx_in_subsw_c = idx_in_sw_c % 4;
     int permuted_subsw_idx_c = subsw_idx_c;
-    if (2 > 1){
+    if (1 > 1){
         permuted_subsw_idx_c = subsw_idx_c ^ (subsw_idx_s % 2);
     }
     int premuted_idx_in_subsw_c = idx_in_subsw_c ^ (idx_in_subsw_s % 4);
@@ -244,27 +229,27 @@ struct MyTensorOpLayout {
   template <int LdmCountStride, int LdmCountContig>
   __forceinline__ __host__ __device__ constexpr static int64_t get_ldm_initial_offset(int32_t lane_idx, int32_t permute_m_pointer_idx, bool transpose)   {
 
+    // tnt(kForward): crosswise 版 (与 wa 相同)
     int stride = -1;
     int contig_vec = -1;
     if (LdmCountContig == 1){
-        stride = lane_idx;
-        contig_vec = (lane_idx & 0b111) ^ permute_m_pointer_idx;
+        stride = lane_idx >> 1;
+        contig_vec = ((lane_idx >> 1) & 0b11) ^ ((lane_idx & 1) << 2) ^ permute_m_pointer_idx;
     } else if (LdmCountContig == 2 && LdmCountStride == 2){
         if (transpose){
-            int _01234567 = (lane_idx & 0b111);
-            stride = _01234567 + (lane_idx >> 4 << 3);
-            contig_vec = _01234567 ^ (((lane_idx >> 3) & 1) + (permute_m_pointer_idx << 1));
+            int _00112233 = ((lane_idx >> 1) & 0b11);
+            stride = _00112233 + (lane_idx >> 4 << 2);
+            contig_vec = (_00112233 + ((lane_idx & 1) << 2)) ^ ((lane_idx >> 3) & 1) ^ (permute_m_pointer_idx << 1);
         }else{
-            int _01234567 = (lane_idx & 0b111);
-            stride = lane_idx & 0b1111;
-            contig_vec = _01234567 ^ ((lane_idx >> 4) + (permute_m_pointer_idx << 1));
+            stride = (lane_idx & 0b1111) >> 1;
+            contig_vec = ((((lane_idx >> 1) & 0b11) + ((lane_idx & 1) << 2)) ^ (lane_idx >> 4)) ^ (permute_m_pointer_idx << 1);
         }
     }else if (LdmCountContig == 2 && LdmCountStride == 1){
-        stride = lane_idx & 0b111;
-        contig_vec = stride ^ ((lane_idx >> 3) ^ (permute_m_pointer_idx << 1));
-    }else {
-        stride = lane_idx & 0b111;
-        contig_vec = stride ^ ((lane_idx >> 3) + (permute_m_pointer_idx << 2));
+        stride = (lane_idx & 0b111) >> 1;
+        contig_vec = (((lane_idx >> 1) & 0b11) ^ ((lane_idx & 1) << 2)) ^ (lane_idx >> 3) ^ (permute_m_pointer_idx << 1);
+    } else{
+        stride = (lane_idx & 0b111) >> 1;
+        contig_vec = (((lane_idx >> 1) & 0b11) + ((lane_idx & 1) << 2)) ^ (lane_idx >> 3);
     }
     return stride * 128 + contig_vec * 8;
   }
@@ -384,72 +369,76 @@ class WarpIteratorCrosswise {
   }
 };
 
-// ===== mma_ns_wb/WarpIteratorCongruous =====
-class WarpIteratorCongruous {
+// ===== mma_ns_wb/WarpIteratorCrosswiseB (tnt kForward 版, B 操作数) =====
+// tnt(kForward): B 也用 crosswise 迭代器 (ttt dgrad 用 congruous)
+// 与 A 版差异: transpose=true, mn_offset*512, frag=16 half, LdMatrix 非 trans
+class WarpIteratorCrosswiseB {
  public:
   using TensorOpLayout = mma_ns_wb::layout::MyTensorOpLayout;
-  using LdMatrix = LdMatrixX4Trans;
-  int wmma_k_index_;
-  const std::array<half, 8> * pointer_[2];
+  using LdMatrix = LdMatrixX4;
+  const std::array<half, 8> * pointer_;
   int32_t byte_offset_;
-  __forceinline__ __device__  WarpIteratorCongruous(half * ptr, int warp_idx_k, int warp_idx_mn, int lane_idx) : wmma_k_index_(0), byte_offset_(0)  {
+  int wmma_k_index_;
+  __forceinline__ __device__  WarpIteratorCrosswiseB(half * ptr, int warp_idx_k, int warp_idx_mn, int lane_idx) : pointer_(reinterpret_cast<const std::array<half, 8> *>(ptr)), wmma_k_index_(0), byte_offset_(0)  {
 
-    lane_idx %= 32;
-    #pragma unroll
-    for (int i = 0; i < 2; ++i) {
-        int offset = TensorOpLayout::get_ldm_initial_offset<1, 4>(
-            lane_idx, i, true);
-        pointer_[i] = reinterpret_cast<const std::array<half, 8> * >(ptr + offset);
-    }
+    #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 750))
+        lane_idx = lane_idx % (4 * 8);
+    #endif
+    int offset_e = TensorOpLayout::get_ldm_initial_offset<4, 1>(
+        lane_idx, 0, true);
+    byte_offset_ = offset_e * 16 / 8;
     add_tile_offset(4 * warp_idx_k, warp_idx_mn);
   }
-  __forceinline__ __device__ void add_pointer_offset(int64_t offset)   {
-    byte_offset_ += offset * sizeof(half);
-  }
-  __forceinline__ __device__ void add_tile_offset(int warp_idx_k, int warp_idx_mn, bool force_update = false)   {
-
-        constexpr int kContigEqual = 64;
+  __forceinline__ __device__ void add_tile_offset(int warp_idx_k, int warp_idx_mn)   {
     int mn_offset = warp_idx_mn;
     int k_offset = warp_idx_k;
-    if (64 < kContigEqual || force_update) {
-      constexpr int kwarp_per_crosswise = 1;
-      int warp_offset = warp_idx_mn & (kwarp_per_crosswise - 1);
-      mn_offset = warp_idx_mn ^ warp_offset;            // kwarp_per_crosswise is 2^a
-      warp_offset *= 2 / kwarp_per_crosswise;
-      if (warp_offset || force_update) {
-    const std::array<half, 8> * buffer[2];
-    #pragma unroll
-    for (int i = 0; i < 2; ++i)
-      buffer[i] = pointer_[(i + warp_offset) % 2];
-    #pragma unroll
-    for (int i = 0; i < 2; ++i)
-      pointer_[i] = buffer[i];
-      }
-    }
-    int offset = (k_offset * 1024 +
-                mn_offset * 64);
-    add_pointer_offset(offset);
+    int sw_part_idx = k_offset / 4;
+    int idx_in_sw_part = k_offset % 4;
+    byte_offset_ ^= (idx_in_sw_part * 16);
+    pointer_ +=
+        mn_offset * 512 +
+        sw_part_idx * 8;
   }
   __forceinline__ __device__ void tile_increment(int num_tile)   {
     add_tile_offset(num_tile, 0);
   }
-  __forceinline__ __device__ WarpIteratorCongruous & operator++()   {
-    add_tile_offset(1, 0); // strided, contig
+  __forceinline__ __device__ WarpIteratorCrosswiseB & operator++()   {
+
+    if (((wmma_k_index_ & 1) & 1) == 0){
+        // bit 0 advance
+        byte_offset_ ^= 0b1 * 16;
+    }
+    else if ((wmma_k_index_ & 1) == 0b1){
+        // bit 1 advance
+        byte_offset_ ^= 0b11 * 16;
+    }
+    else if ((wmma_k_index_ & 1) == 0b11){
+        // bit 2 advance
+        byte_offset_ ^= 0b111 * 16;
+    }
+    wmma_k_index_++;
+    if (wmma_k_index_ == 4) {
+        wmma_k_index_ = 0;
+        // k group increment
+        add_tile_offset(4, 0);
+    }
     return *this;
   }
   __forceinline__ __device__ void load_with_byte_offset(std::array<half, 16>& frag, int32_t byte_offset)   {
     std::array<unsigned, 4> *fetch_ptr =
-    reinterpret_cast<std::array<unsigned, 4> *>(&frag);
+        reinterpret_cast<std::array<unsigned, 4> *>(&frag);
     #pragma unroll
-    for (int s = 0; s < 1; ++s) {
+    for (int s = 0; s < 2; ++s) {
         #pragma unroll
-        for (int c = 0; c < 2; ++c) {
-            int access_idx = c + s * 2;
+        for (int c = 0; c < 1; ++c) {
+            int access_idx = c + s * 1;
             const std::array<half, 8> * source_ptr =
-                pointer_[c % 2] +
-                8 * (c / 2) +
-                1 * s * 16;
-            char const *source_byte_ptr = reinterpret_cast<char const *>(source_ptr) + byte_offset + byte_offset_;
+                pointer_ + 1 * c +
+                8 * 4 * s *
+                8;
+            char const *source_byte_ptr =
+                reinterpret_cast<char const *>(source_ptr) + byte_offset +
+                byte_offset_;
             LdMatrix::run(fetch_ptr[access_idx], source_byte_ptr);
         }
     }
@@ -461,7 +450,7 @@ class WarpIteratorCongruous {
     load_with_byte_offset(frag, 0);
   }
   __forceinline__ __device__ void set_kgroup_index(int wmma_k)   {
-
+    wmma_k_index_ = wmma_k % (4);
   }
 };
 
@@ -532,27 +521,27 @@ class SmemTileIteratorA {
   }
 };
 
-// ===== mma_ns_sb/SmemTileIterator (B operand) =====
+// ===== mma_ns_sb/SmemTileIterator (B operand, tnt kForward 版) =====
 class SmemTileIteratorB {
  public:
   using ThreadMap = inpiterb::tmap::PitchLinearWarpRaked;
   using Layout = mma_ns_wb::layout::MyTensorOpLayout;
-  std::array<half, 8> * pointer_[2];
+  std::array<half, 8> * pointer_[1];
   int32_t byte_offset_;
   __forceinline__ __device__  SmemTileIteratorB(int stride, half * ptr, int thread_id) : byte_offset_(0)  {
 
     auto thread_offset_base = ThreadMap::initial_offset(thread_id);
     auto layout = Layout();
     #pragma unroll
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 1; ++i) {
         pointer_[i] = reinterpret_cast<std::array<half, 8> *>(
-            ptr + layout(thread_offset_base[0] + i * 4,
+            ptr + layout(thread_offset_base[0] + i * 8,
                         thread_offset_base[1]));
     }
   }
   __forceinline__ __device__ std::array<half, 8> * get(int s, int c)  const {
-    std::array<half, 8> * access_ptr = pointer_[s & 1];
-    int external_stride_idx = (s & ~1);
+    std::array<half, 8> * access_ptr = pointer_[s & 0];
+    int external_stride_idx = (s & ~0);
     int access_offset = (external_stride_idx * 4 *
                      16 + c * 8);
     char *access_byte_ptr =
@@ -563,11 +552,11 @@ class SmemTileIteratorB {
     byte_offset_ += offset * sizeof(half);
   }
   __forceinline__ __device__ void add_tile_offset(int s, int c)   {
-    add_pointer_offset(c * 128 +
-        s * 4096);
+    add_pointer_offset(c * 64 +
+        s * 8192);
   }
   __forceinline__ __device__ void tile_increment(int num_tile)   {
-    add_tile_offset(num_tile, 0);
+    add_tile_offset(0, num_tile);
   }
   __forceinline__ __device__ void store_with_pointer_offset(std::array<half, 32> const& frag, int32_t pointer_offset)   {
     store_with_byte_offset(frag, pointer_offset * 16 / 8);
@@ -576,10 +565,10 @@ class SmemTileIteratorB {
 
     const std::array<half, 8> * frag_ptr = reinterpret_cast<const std::array<half, 8> *>(&frag);
     #pragma unroll
-    for (int s = 0; s < 2; ++s) {
+    for (int s = 0; s < 4; ++s) {
         #pragma unroll
-        for (int c = 0; c < 2; ++c) {
-            int access_idx = c + s * 2;
+        for (int c = 0; c < 1; ++c) {
+            int access_idx = c + s * 1;
             char *byte_ptr = reinterpret_cast<char *>(get(s, c)) + byte_offset;
             std::array<half, 8> * access_ptr = reinterpret_cast<std::array<half, 8> *>(byte_ptr);
             *access_ptr = frag_ptr[access_idx];
@@ -594,7 +583,7 @@ class SmemTileIteratorB {
     store_with_pointer_offset(frag, 0);
   }
   __forceinline__ __device__ SmemTileIteratorB & operator++()   {
-    add_tile_offset(1, 0);
+    add_tile_offset(0, 1);
     return *this;
   }
 };
@@ -704,16 +693,16 @@ struct AsyncCopyIterGlobalB {
     dest_ptr = smem_iter.store_ptr_with_param(0, 0, valid);
     CpAsyncCopy16B::copy(dest_ptr, src_ptr, valid);
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(0, 1, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(0, 1, valid);
-    CpAsyncCopy16B::copy(dest_ptr, src_ptr, valid);
-    valid = true;
     src_ptr = input_iter.load_ptr_with_param(1, 0, valid);
     dest_ptr = smem_iter.store_ptr_with_param(1, 0, valid);
     CpAsyncCopy16B::copy(dest_ptr, src_ptr, valid);
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(1, 1, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(1, 1, valid);
+    src_ptr = input_iter.load_ptr_with_param(2, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(2, 0, valid);
+    CpAsyncCopy16B::copy(dest_ptr, src_ptr, valid);
+    valid = true;
+    src_ptr = input_iter.load_ptr_with_param(3, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(3, 0, valid);
     CpAsyncCopy16B::copy(dest_ptr, src_ptr, valid);
   }
   template <typename InputIter, typename SmemIter>
@@ -727,16 +716,16 @@ struct AsyncCopyIterGlobalB {
     dest_ptr = smem_iter.store_ptr_with_param(0, 0, valid);
     CpAsyncCopy16B::copy_zfill(dest_ptr, src_ptr, valid);
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(0, 1, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(0, 1, valid);
-    CpAsyncCopy16B::copy_zfill(dest_ptr, src_ptr, valid);
-    valid = true;
     src_ptr = input_iter.load_ptr_with_param(1, 0, valid);
     dest_ptr = smem_iter.store_ptr_with_param(1, 0, valid);
     CpAsyncCopy16B::copy_zfill(dest_ptr, src_ptr, valid);
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(1, 1, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(1, 1, valid);
+    src_ptr = input_iter.load_ptr_with_param(2, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(2, 0, valid);
+    CpAsyncCopy16B::copy_zfill(dest_ptr, src_ptr, valid);
+    valid = true;
+    src_ptr = input_iter.load_ptr_with_param(3, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(3, 0, valid);
     CpAsyncCopy16B::copy_zfill(dest_ptr, src_ptr, valid);
   }
 };
@@ -810,8 +799,8 @@ struct AsyncCopyIter1B {
     const void* src_ptr;
     void* dest_ptr;
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(0, 1, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(0, 1, valid);
+    src_ptr = input_iter.load_ptr_with_param(1, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(1, 0, valid);
     CpAsyncCopy16B::copy(dest_ptr, src_ptr, valid);
   }
   template <typename InputIter, typename SmemIter>
@@ -821,8 +810,8 @@ struct AsyncCopyIter1B {
     const void* src_ptr;
     void* dest_ptr;
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(0, 1, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(0, 1, valid);
+    src_ptr = input_iter.load_ptr_with_param(1, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(1, 0, valid);
     CpAsyncCopy16B::copy_zfill(dest_ptr, src_ptr, valid);
   }
 };
@@ -846,8 +835,8 @@ struct AsyncCopyIter2B {
     const void* src_ptr;
     void* dest_ptr;
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(1, 0, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(1, 0, valid);
+    src_ptr = input_iter.load_ptr_with_param(2, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(2, 0, valid);
     CpAsyncCopy16B::copy(dest_ptr, src_ptr, valid);
   }
   template <typename InputIter, typename SmemIter>
@@ -857,8 +846,8 @@ struct AsyncCopyIter2B {
     const void* src_ptr;
     void* dest_ptr;
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(1, 0, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(1, 0, valid);
+    src_ptr = input_iter.load_ptr_with_param(2, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(2, 0, valid);
     CpAsyncCopy16B::copy_zfill(dest_ptr, src_ptr, valid);
   }
 };
@@ -896,8 +885,8 @@ struct AsyncCopyIter3B {
     const void* src_ptr;
     void* dest_ptr;
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(1, 1, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(1, 1, valid);
+    src_ptr = input_iter.load_ptr_with_param(3, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(3, 0, valid);
     CpAsyncCopy16B::copy(dest_ptr, src_ptr, valid);
   }
   template <typename InputIter, typename SmemIter>
@@ -907,8 +896,8 @@ struct AsyncCopyIter3B {
     const void* src_ptr;
     void* dest_ptr;
     valid = true;
-    src_ptr = input_iter.load_ptr_with_param(1, 1, valid);
-    dest_ptr = smem_iter.store_ptr_with_param(1, 1, valid);
+    src_ptr = input_iter.load_ptr_with_param(3, 0, valid);
+    dest_ptr = smem_iter.store_ptr_with_param(3, 0, valid);
     CpAsyncCopy16B::copy_zfill(dest_ptr, src_ptr, valid);
   }
 };
@@ -968,7 +957,7 @@ using GemmStorage = gemm_smem_storage::BlockMmaStorage;
 
 struct MmaMultiStage {
   WarpIteratorCrosswise warp_iter_A;
-  WarpIteratorCongruous warp_iter_B;
+  WarpIteratorCrosswiseB warp_iter_B;
   SmemTileIteratorA smem_iter_A;
   SmemTileIteratorB smem_iter_B;
   __forceinline__ __device__  MmaMultiStage(GemmStorage* smem_storage, int thread_idx, int warp_idx_k, int warp_m, int warp_n, int lane_idx) : warp_iter_A(smem_storage->smem_A.data_(), warp_idx_k, warp_m, lane_idx), warp_iter_B(smem_storage->smem_B.data_(), warp_idx_k, warp_n, lane_idx), smem_iter_A(64, smem_storage->smem_A.data_(), thread_idx), smem_iter_B(128, smem_storage->smem_B.data_(), thread_idx)  {
@@ -976,26 +965,26 @@ struct MmaMultiStage {
   }
   __forceinline__ __device__ void copy_tiles_and_advance(InputIteratorA & input_iter_A, InputIteratorB & input_iter_B, const int & group_idx)   {
 
-                        if(group_idx == 0){
-                          AsyncCopyIter0A::do_copy_zfill(input_iter_A, smem_iter_A);
-                          AsyncCopyIter0B::do_copy_zfill(input_iter_B, smem_iter_B);
-                          return;
-                        }
-                        if(group_idx == 1){
-                            AsyncCopyIter1A::do_copy_zfill(input_iter_A, smem_iter_A);
-                            AsyncCopyIter1B::do_copy_zfill(input_iter_B, smem_iter_B);
-                            return;
-                        }
-                        if(group_idx == 2){
-                            AsyncCopyIter2A::do_copy_zfill(input_iter_A, smem_iter_A);
-                            AsyncCopyIter2B::do_copy_zfill(input_iter_B, smem_iter_B);
-                            return;
-                        }
-                        if(group_idx == 3){
-                            AsyncCopyIter3A::do_copy_zfill(input_iter_A, smem_iter_A);
-                            AsyncCopyIter3B::do_copy_zfill(input_iter_B, smem_iter_B);
-                            return;
-                        }
+    if(group_idx == 0){
+      AsyncCopyIter0A::do_copy_zfill(input_iter_A, smem_iter_A);
+      AsyncCopyIter0B::do_copy_zfill(input_iter_B, smem_iter_B);
+      return;
+    }
+    if(group_idx == 1){
+      AsyncCopyIter1A::do_copy_zfill(input_iter_A, smem_iter_A);
+      AsyncCopyIter1B::do_copy_zfill(input_iter_B, smem_iter_B);
+      return;
+    }
+    if(group_idx == 2){
+      AsyncCopyIter2A::do_copy_zfill(input_iter_A, smem_iter_A);
+      AsyncCopyIter2B::do_copy_zfill(input_iter_B, smem_iter_B);
+      return;
+    }
+    if(group_idx == 3){
+      AsyncCopyIter3A::do_copy_zfill(input_iter_A, smem_iter_A);
+      AsyncCopyIter3B::do_copy_zfill(input_iter_B, smem_iter_B);
+      return;
+    }
   }
   __forceinline__ __device__ void operator()(const int& gemm_k_iterations, std::array<half, 64>& accumulators, InputIteratorA & input_iter_A, InputIteratorB & input_iter_B, std::array<half, 64> const& src_accumulators, uint32_t mask, const int& RS)   {
 
