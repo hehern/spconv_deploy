@@ -215,6 +215,15 @@ int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k,
   int* inSpatialShape_ptr = ou.ptr<int>();//size:xyz
   
   cuda_linear_launch(buildSubmConvHashTable, _stream, numActIn, indicesIn_ptr, hashdata_k_ptr, hashdata_v_ptr, inSpatialShape_ptr);//计算Hash_out：建立输出张量坐标(通过index表示)到输出序号之间的一张哈希表
+  // hash 表按 key 升序排序 (value 跟随), 使 calc_subm_conv_indices_mask 可用二分查找。
+  // 原实现为无序表 + 线性扫描, 查找复杂度 O(N^2 * RS) (subm2 层约 780 亿次比较/帧),
+  // 排序 + 二分后降为 O(N log N + N * RS * log N), 是 Lidar Backbone 的主要耗时来源。
+  {
+    thrust::device_ptr<int> ptr_sort_k(hashdata_k_ptr);
+    thrust::device_ptr<int> ptr_sort_v(hashdata_v_ptr);
+    auto thrust_ctx = thrust::cuda::par.on(_stream);
+    thrust::sort_by_key(thrust_ctx, ptr_sort_k, ptr_sort_k + numActIn, ptr_sort_v);
+  }
   // checkRuntime(cudaStreamSynchronize(_stream));
   // std::cout << "buildSubmConvHashTable!" << std::endl;
   uint32_t* indice_pair_mask_ptr = indice_pair_mask.ptr<uint32_t>();

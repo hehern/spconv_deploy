@@ -377,9 +377,17 @@ __global__ void calc_subm_conv_indices_mask(const int* hashdata_k, const int* ha
     int nhw_offset[4];
     if (loc_iter.query_nhw(indices_in + ix * 4, nhw_offset)) {//输出坐标计算输入坐标
       auto offset = loc_iter.layout_npq(nhw_offset);//3d坐标转换为一维index
-      int table_offset;
-      for (table_offset = 0; table_offset < num_indices; ++table_offset) {//遍历hash表
-        if (hashdata_k[table_offset] == offset) break;
+      // 二分查找: hash 表已按 key 升序排序 (见 generate_subm_conv_inds 中 sort_by_key)
+      int table_offset = num_indices;
+      {
+        int lo = 0, hi = num_indices - 1;
+        while (lo <= hi) {
+          int mid = (lo + hi) >> 1;
+          int key = hashdata_k[mid];
+          if (key == offset) { table_offset = mid; break; }
+          else if (key < offset) lo = mid + 1;
+          else hi = mid - 1;
+        }
       }
       if (table_offset < num_indices) {//找到的情况下
         auto input_index = hashdata_v[table_offset]; // we find a input indice idx.
@@ -450,9 +458,16 @@ __global__ void build_conv_hash_table(size_t numAct,
   hashdata_v[ix] = ix;
 }
 
+// 二分查找: hash_k 来自 find_unique_elements_cuda (sort+unique) 拷贝, 天然升序唯一,
+// 原 O(N) 线性扫描被 calc_conv_indices_stage2_inference_mask 每线程调用, 整体 O(N^2*RS)。
 __device__ int find_in_hash_k(const int* hash_k, int hash_size, int value) {
-  for (int i = 0; i < hash_size; ++i) {
-    if (hash_k[i] == value) return i;
+  int lo = 0, hi = hash_size - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) >> 1;
+    int key = hash_k[mid];
+    if (key == value) return mid;
+    else if (key < value) lo = mid + 1;
+    else hi = mid - 1;
   }
   return -1;
 }

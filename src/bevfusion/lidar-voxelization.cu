@@ -261,10 +261,10 @@ class VoxelizationImplement : public Voxelization {
     cuda_linear_launch(reduce_mean_kernel, _stream, real_num_voxels_, voxels_temp_, d_voxel_num_, param_.max_points_per_voxel,
                        param_.num_feature, d_voxel_features_);//将voxels_temp_中的点特征按照维度求平均，保存在d_voxel_features_中
     //内存拷贝
-    checkRuntime(cudaMemcpyAsync(h_voxel_features_, d_voxel_features_, voxel_features_size_, cudaMemcpyDeviceToHost, _stream));
-    checkRuntime(cudaMemcpyAsync(h_voxel_indices_, d_voxel_indices_, voxel_idxs_size_, cudaMemcpyDeviceToHost, _stream));
+    // checkRuntime(cudaMemcpyAsync(h_voxel_features_, d_voxel_features_, voxel_features_size_, cudaMemcpyDeviceToHost, _stream));
+    // checkRuntime(cudaMemcpyAsync(h_voxel_indices_, d_voxel_indices_, voxel_idxs_size_, cudaMemcpyDeviceToHost, _stream));
     
-    checkRuntime(cudaStreamSynchronize(_stream));
+    // checkRuntime(cudaStreamSynchronize(_stream));
   }
 
   virtual unsigned int num_voxels() override { return real_num_voxels_; }//非空体素栅格个数
