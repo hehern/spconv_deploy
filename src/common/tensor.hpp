@@ -168,6 +168,11 @@ struct Tensor {
   static Tensor load(const std::string& file, bool device = true);
   static Tensor loadbinary(const std::string& file, std::vector<int64_t> shape, DataType dtype, bool device = true);
   static bool save(const Tensor& tensor, const std::string& file, void* stream = nullptr);
+
+  // 启动时预填设备内存池 (通用阶梯约 260MB, 见 tensor.cu MemoryPool::prime_device)。
+  // 之后所有 tensor create 优先 best-fit 命中预填块, 第一帧不再有池冷启动 cudaMalloc。
+  // 建议在模型加载完成、正式推理前调用一次 (需 CUDA context 已初始化)。
+  static void pool_prime();
 };
 
 };  // namespace nv

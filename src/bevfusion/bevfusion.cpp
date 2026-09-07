@@ -26,6 +26,7 @@
 #include <numeric>
 
 #include "common/check.hpp"
+#include "common/tensor.hpp"
 #include "common/timer.hpp"
 
 namespace bevfusion {
@@ -97,6 +98,12 @@ class CoreImplement : public Core {
     bytes_capacity_points_ = capacity_points_ * param.lidar_scn.voxelization.num_feature * sizeof(nvtype::half);
     checkRuntime(cudaMalloc(&lidar_points_device_, bytes_capacity_points_));
     checkRuntime(cudaMallocHost(&lidar_points_host_, bytes_capacity_points_));
+
+    // 预填 tensor 内存池 (通用阶梯约 260MB): 之后 Lidar/相机热路径的 tensor 创建
+    // 全部 best-fit 命中预填块, 消除第一帧的池冷启动 cudaMalloc
+    // (kernel 模块加载等一次性开销仍由调用方的 warmup 帧覆盖)。
+    nv::Tensor::pool_prime();
+
     param_ = param;
     return true;
   }

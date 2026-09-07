@@ -28,6 +28,8 @@
 #include <string.h>
 
 #include <algorithm>
+#include <map>
+#include <mutex>
 #include <numeric>
 #include <unordered_map>
 
@@ -38,6 +40,93 @@
 namespace nv {
 
 using namespace std;
+
+// ===== tensor 内存池 =====
+// 推理循环中 tensor 创建/销毁极频繁 (Lidar Backbone 每帧约 150 次:
+// 21 层 conv 输出/bias 输出 + 8 次 rulebook 生成 + thrust 内部临时分配),
+// 裸 cudaMalloc/cudaFree 不仅单次开销大, cudaFree 还会隐式同步设备,
+// 打断 kernel 流水线产生 GPU 空闲气泡 (实测 kernel 仅 6ms 时 wall 达 17ms)。
+//
+// 池策略:
+//  - best-fit: 请求取 >= bytes 的最小可用空闲块 (std::map 有序桶 + lower_bound)。
+//    好处: prime 预填的通用档位块可以服务任意更小的请求, 第一帧即零 cudaMalloc;
+//    点云数量波动导致 size 漂移时也优先复用已有块而非新分配。
+//  - 归还按请求 bytes 记账 (块实际 >= bytes, 复用永远安全), 稳态下
+//    每帧分配 pattern 重复, 精确桶自然形成, 命中率接近 100%。
+//  - pool_prime(): 启动时按通用阶梯一次性预填 (约 260MB),
+//    消除第一帧的池冷启动 cudaMalloc; 池内显存由 context 销毁时回收,
+//    同时也消除了进程退出时 cudaFree 触发 "driver shutting down" 报错。
+namespace {
+struct MemoryPool {
+  std::mutex mutex;
+  std::map<size_t, std::vector<void*>> device_blocks;
+  std::map<size_t, std::vector<void*>> host_blocks;
+  static constexpr size_t kMaxCachedPerBucket = 64;     // 每桶最多缓存块数
+  static constexpr size_t kMaxPooledBytes = 1ull << 28; // 超过 256MB 直接走 CUDA API
+
+  void* acquire(size_t bytes, bool device) {
+    if (bytes == 0 || bytes > kMaxPooledBytes) return nullptr;
+    auto& pool = device ? device_blocks : host_blocks;
+    std::lock_guard<std::mutex> lock(mutex);
+    // best-fit: 从小到大找第一个 >= bytes 且非空的桶
+    for (auto it = pool.lower_bound(bytes); it != pool.end(); ++it) {
+      if (!it->second.empty()) {
+        void* p = it->second.back();
+        it->second.pop_back();
+        return p;
+      }
+    }
+    return nullptr;
+  }
+
+  void release(void* p, size_t bytes, bool device) {
+    if (p == nullptr || bytes == 0 || bytes > kMaxPooledBytes) {
+      // 不入池的块保持原语义直接释放
+      if (p != nullptr) {
+        if (device) checkRuntime(cudaFree(p));
+        else checkRuntime(cudaFreeHost(p));
+      }
+      return;
+    }
+    auto& pool = device ? device_blocks : host_blocks;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& bucket = pool[bytes];
+    if (bucket.size() < kMaxCachedPerBucket) {
+      bucket.push_back(p);
+    } else {
+      if (device) checkRuntime(cudaFree(p));
+      else checkRuntime(cudaFreeHost(p));
+    }
+  }
+
+  // 启动时通用阶梯预填: 覆盖 SCN 热路径的尺寸量级
+  // (conv 输出 numAct*K*2B ≈ 1~12MB, rulebook 27*numAct*4B ≈ 5~8MB,
+  //  hash/argsort/mask ≈ 0.2~0.3MB, bias/relu 输出同量级),
+  // best-fit 下这些请求全部命中预填块, 第一帧不再有池冷启动分配。
+  void prime_device() {
+    const std::pair<size_t, int> plan[] = {
+        {64ull << 10, 16},    //  64KB ×16 =   1MB
+        {256ull << 10, 16},   // 256KB ×16 =   4MB
+        {1ull << 20, 16},     //   1MB ×16 =  16MB
+        {4ull << 20, 12},     //   4MB ×12 =  48MB
+        {8ull << 20, 8},      //   8MB ×8  =  64MB
+        {16ull << 20, 8},     //  16MB ×8  = 128MB
+    };                        // 合计约 260MB
+    std::lock_guard<std::mutex> lock(mutex);
+    for (auto& item : plan) {
+      auto& bucket = device_blocks[item.first];
+      for (int i = 0; i < item.second; ++i) {
+        void* p = nullptr;
+        if (cudaMalloc(&p, item.first) == cudaSuccess) bucket.push_back(p);
+      }
+    }
+  }
+};
+MemoryPool& memory_pool() {
+  static MemoryPool inst;
+  return inst;
+}
+}  // namespace
 
 #define DISPATCH_BY_TYPES(dtype, ...)                  \
   [&]() {                                              \
@@ -253,11 +342,8 @@ TensorData::~TensorData() { TensorData::free(); }
 
 void TensorData::free() {
   if (data && owner) {
-    if (device) {
-      checkRuntime(cudaFree(data));
-    } else {
-      checkRuntime(cudaFreeHost(data));
-    }
+    // 归还内存池复用 (见文件头部 MemoryPool 说明), 消除热路径 cudaFree 的隐式同步
+    memory_pool().release(data, bytes, device);
   }
   data = nullptr;
   owner = false;
@@ -291,6 +377,12 @@ TensorData* TensorData::create(size_t bytes, DataType dtype, bool device) {
   output->dtype = dtype;
   output->bytes = bytes;
   output->device = device;
+
+  // 优先从内存池取 (推理时每帧分配 pattern 重复, 命中率接近 100%)
+  if (bytes > 0) {
+    output->data = memory_pool().acquire(bytes, device);
+    if (output->data != nullptr) return output;
+  }
 
   if (device)
     checkRuntime(cudaMalloc(&output->data, bytes));
@@ -746,5 +838,7 @@ void Tensor::self_byte_check(size_t type_bytes) const {
 }
 
 bool Tensor::save(const Tensor& tensor, const std::string& file, void* stream) { return tensor.save(file, stream); }
+
+void Tensor::pool_prime() { memory_pool().prime_device(); }
 
 };  // namespace nv
