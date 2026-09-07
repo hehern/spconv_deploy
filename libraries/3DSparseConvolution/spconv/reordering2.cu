@@ -43,6 +43,47 @@ void implicit_gemm_cuda(nv::Tensor features,
                         nv::Tensor out_features,
                         void* stream) {
     cudaStream_t _stream = static_cast<cudaStream_t>(stream);
+
+    // 0. 通道对齐检查与 pad (修复 C 非 8 倍数时崩溃的问题)
+    //    conv_kernel 全局加载路径 (ld.global.v4.b32 / cp.async.cg 16B) 是 16 字节
+    //    向量访问, 要求 A/B 行内通道步长 C 为 8 个 half 的倍数:
+    //      A 地址 = row * C * 2 字节                        (C=5 -> 行步长 10B, 非 16 倍数)
+    //      B 地址 = (k * kv*C + kv * C + c) * 2 字节        (strides={kv*C, C} 均非 16 倍数)
+    //    C 不对齐时这些访问全部触发 misaligned address, kernel 直接崩溃。
+    //    修复: host 侧把 C pad 到 8 的倍数, pad 通道填 0 (0 特征 x 0 权重 = 0 贡献, 结果不变)。
+    const int kCAlign = 8;
+    int C_raw = features.size(1);
+    int C_pad = (C_raw + kCAlign - 1) / kCAlign * kCAlign;
+
+    if (C_pad != C_raw) {
+        int numActIn_raw = features.size(0);
+        int K_raw = filters.size(0);
+        int kv_raw = filters.size(1);
+
+        // pad features: (numActIn, C_raw) -> (numActIn, C_pad)
+        nv::Tensor features_pad = nv::Tensor::create(
+            std::vector<int64_t>{numActIn_raw, C_pad}, features.dtype(), features.device());
+        features_pad.memset(0, stream);
+        checkRuntime(cudaMemcpy2DAsync(
+            features_pad.ptr<half>(), C_pad * sizeof(half),  // dst, dst pitch
+            features.ptr<half>(), C_raw * sizeof(half),      // src, src pitch
+            C_raw * sizeof(half), numActIn_raw,              // width, height
+            cudaMemcpyDeviceToDevice, _stream));
+
+        // pad filters: (K, kv, C_raw) -> (K, kv, C_pad)
+        nv::Tensor filters_pad = nv::Tensor::create(
+            std::vector<int64_t>{K_raw, kv_raw, C_pad}, filters.dtype(), filters.device());
+        filters_pad.memset(0, stream);
+        checkRuntime(cudaMemcpy2DAsync(
+            filters_pad.ptr<half>(), C_pad * sizeof(half),
+            filters.ptr<half>(), C_raw * sizeof(half),
+            C_raw * sizeof(half), int64_t(K_raw) * kv_raw,
+            cudaMemcpyDeviceToDevice, _stream));
+
+        features = features_pad;
+        filters = filters_pad;
+    }
+
     // 1. 提取维度信息
     int numActIn  = features.size(0);      // 输入有效点数
     int C         = features.size(1);      // 输入通道数
@@ -112,15 +153,13 @@ void implicit_gemm_cuda(nv::Tensor features,
     }
 
     // 8. 启动 kernel (conv_kernel 定义在 reordering2.cu.h 中)
-    checkRuntime(cudaStreamSynchronize(_stream));
-    std::cout << "conv_kernel begin!" << std::endl;
-    std::cout << "numActIn: " << numActIn << std::endl;
-    std::cout << "numActOut: " << numActOut << std::endl;
-    std::cout << "conv_kernel grid dim: (" << grid.x << ", " << grid.y << ", " << grid.z << ")" << std::endl;
-    std::cout << "conv_kernel block dim: (" << block.x << ", " << block.y << ", " << block.z << ")" << std::endl;
+    // std::cout << "conv_kernel begin!" << std::endl;
+    // std::cout << "numActIn: " << numActIn << std::endl;
+    // std::cout << "numActOut: " << numActOut << std::endl;
+    // std::cout << "C(raw/pad): " << C_raw << "/" << C << ", K: " << K << ", kernel_volume: " << kernel_volume << std::endl;
+    // std::cout << "conv_kernel grid dim: (" << grid.x << ", " << grid.y << ", " << grid.z << ")" << std::endl;
+    // std::cout << "conv_kernel block dim: (" << block.x << ", " << block.y << ", " << block.z << ")" << std::endl;
     conv_kernel<<<grid, block, smem_size, reinterpret_cast<cudaStream_t>(stream)>>>(ker_params);
-    checkRuntime(cudaStreamSynchronize(_stream));
-    std::cout << "conv_kernel end!" << std::endl;
 
     cudaError_t result = cudaGetLastError();
     if (result != cudaSuccess) {

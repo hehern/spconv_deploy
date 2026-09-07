@@ -71,7 +71,6 @@ using cumm::conv::Output;
 __global__ void conv_kernel(ConvParams params) {
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
-    constexpr bool kSplitKSerial = false;
     extern __shared__ uint8_t SharedStorage[];
     auto gemm_shared_mem =
         reinterpret_cast<BlockMmaStorage *>(SharedStorage);
@@ -80,9 +79,9 @@ __global__ void conv_kernel(ConvParams params) {
 
     // 1. Block/Thread 坐标
     int tile_offset_m = blockIdx.x;
-    int tile_offset_n = blockIdx.y;
-    int tile_offset_k = blockIdx.z;
-    printf("blockIdx.x: %d, blockIdx.y: %d, blockIdx.z: %d\n", blockIdx.x, blockIdx.y, blockIdx.z);
+    int tile_offset_n = blockIdx.y;//0
+    int tile_offset_k = blockIdx.z;//0
+    // printf("blockIdx.x: %d, blockIdx.y: %d, blockIdx.z: %d\n", blockIdx.x, blockIdx.y, blockIdx.z);
     if (tile_offset_m >= params.grid_dims.x ||
         tile_offset_n >= params.grid_dims.y) {
         return;
@@ -131,7 +130,7 @@ __global__ void conv_kernel(ConvParams params) {
     for (int i = 0; i < 2; ++i){
         kmask |= masks[i];
     }
-    // Warp 级归约: 所有 lane 的 kmask 做 OR
+    // Warp 级归约: 所有 lane 的 kmask 做 OR,由于前面每个lane计算两个不同warp的mask，所以这里做到了block级归约
     #pragma unroll
     for (int mask = 16; mask > 0; mask /= 2) {
         kmask |= __shfl_xor_sync(0xffffffff, kmask, mask, 32);
@@ -147,8 +146,8 @@ __global__ void conv_kernel(ConvParams params) {
     // std::array::fill 是 __host__ 函数, 设备端用循环初始化
     #pragma unroll
     for (int i = 0; i < 64; ++i) accumulators[i] = half{};
-    if (!kSplitKSerial || params.gemm_k_iterations > 0){
-        if (kmask != 0){
+    if (params.gemm_k_iterations > 0){//c/32向上取整
+        if (kmask != 0){//当前block内输入元素有参与conv
             mma(params.gemm_k_iterations, accumulators,
                 input_iter_A, input_iter_B, accumulators,
                 kmask, params.problem.kernel_volume);

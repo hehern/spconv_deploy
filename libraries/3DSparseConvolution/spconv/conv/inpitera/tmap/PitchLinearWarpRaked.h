@@ -14,8 +14,8 @@ struct PitchLinearWarpRaked {
   __forceinline__ __host__ __device__ static std::array<int, 2> initial_offset(int thread_id)   {
     if(is_skipped(thread_id))
         return {0, 0};        // to InputIter: inefficient but convenience dummy offset.
-    int warp_id = (thread_id / 32);
-    int lane_id = (thread_id % 32);
+    int warp_id = (thread_id / 32);//0-3
+    int lane_id = (thread_id % 32);//0-31
     std::array<int, 2> warp_offset{warp_id / 1,
                                 warp_id % 1};
     constexpr std::array<int, 2> kWarpDilation{16, 4};

@@ -387,30 +387,23 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
 
   int num_act_out = 0;
   if (subm) {
-    cudaStream_t _stream = static_cast<cudaStream_t>(stream);
     num_act_out = numAct;
 
-    nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);//具体干啥用的？
+    nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);
     nv::Tensor hash_v = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);
     nv::Tensor indicePairs = nv::Tensor::create(std::vector<int64_t>{kernelVolume, numAct}, nv::DataType::Int32);
     indicePairs.fill<int32_t>(-1);
     
     nv::Tensor pair_mask = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::UInt32);//每个active voxel都与kernel中的哪个元素进行卷积的mask
-    checkRuntime(cudaStreamSynchronize(_stream));
-    std::cout << "before generate_subm_conv_inds!" << std::endl;
     generate_subm_conv_inds(indices, hash_k, hash_v, indicePairs,
         spatialShape, kernelSize, pair_mask, loc_iter, stream);
 
-    checkRuntime(cudaStreamSynchronize(_stream));
-    std::cout << "before sort_1d_by_key_allocator_v2!" << std::endl;
     nv::Tensor mask_argsort = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);
     sort_1d_by_key_allocator_v2(pair_mask, mask_argsort, stream);//对pair_mask进行排序，返回排序后的索引
 
     nv::Tensor numActOut = nv::Tensor::create(std::vector<int64_t>{1}, nv::DataType::Int32, false);
     numActOut.ptr<int32_t>()[0] = num_act_out;
     
-    checkRuntime(cudaStreamSynchronize(_stream));
-    std::cout << "hahahaha!" << std::endl;
     return {indices, indicePairs, pair_mask, mask_argsort, numActOut};
 
   } else {

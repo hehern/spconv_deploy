@@ -31,7 +31,12 @@ struct WeightOptParams {
   }
   __forceinline__ __host__ __device__ void set_inc_reset_for_inc_k_first(int gemm_iters_k = -1)   {
 
-    inc_c_reset = -gemm_iters_k * filter_c_delta * layout.strides[0] * 16 / 8;
+    // tnt(kForward): gemm-K 沿输入通道 C 迭代, reset 只需 c 归零 (无 strides[0]);
+    // ttt dgrad 版才是 -gemm_iters_k * filter_c_delta * layout.strides[0] * 16 / 8
+    // (dgrad 的 gemm-K 沿输出通道 K 迭代, 需回退 K 行)。搬运时误用了 dgrad 公式,
+    // 导致 reset_k 每次 filter 切换错误回退 filter_c_delta * strides[0] 字节,
+    // 多个 filter 累计偏移达数百 KB, B 读取严重越界 (conv9 illegal address 根因)。
+    inc_c_reset = -gemm_iters_k * filter_c_delta * 16 / 8;
   }
 };
 
