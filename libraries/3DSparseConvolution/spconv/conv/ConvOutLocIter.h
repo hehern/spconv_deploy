@@ -33,12 +33,17 @@ struct ConvOutLocIter {
       input_dims_{input_dims[0], input_dims[1], input_dims[2]} {
   }
   TV_HOST_DEVICE_INLINE void set_filter_offset(int kernel_offset) {
-    kernel_offset_ = kernel_offset;
+    // kernel_offset(kv) 的三维分解, 必须与 weight 的展开顺序一致 (x 主序):
+    //   kv = oz + oy*kz + ox*(ky*kz)  (node_sparseconv: kernel_index = kz + ky*kz + kx*ky*kz)
+    // 原实现的分解 (kv/kx, (kv%kx)/ky, ...) 是错误的, 导致:
+    //   - subm: 邻居方向与 weight 的 kernel 位置配对错乱 (输出值错)
+    //   - stride: 错误方向上的 stride 整除判断大量失败, 输出 voxel 丢失近半
+    //   (conv20 实测: 输出点 7507 vs 数学期望 18079)
     int residual = kernel_offset;
-    count_[0] = int(residual / kernelSize_[0]);
-    residual = residual % kernelSize_[0];
-    count_[1] = int(residual / kernelSize_[1]);
-    count_[2] = int(residual % kernelSize_[1]);
+    count_[0] = int(residual / (kernelSize_[1] * kernelSize_[2]));
+    residual = residual % (kernelSize_[1] * kernelSize_[2]);
+    count_[1] = int(residual / kernelSize_[2]);
+    count_[2] = int(residual % kernelSize_[2]);
   }
   template <bool NoStride>
   TV_HOST_DEVICE_INLINE void nhw_to_npq(const int* nhw_offset, int* out)  const {

@@ -411,8 +411,15 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
     nv::Tensor indice_pairs_uniq = nv::Tensor::create(std::vector<int64_t>{pair_size + 1}, nv::DataType::Int32);
 
     generate_conv_inds_mask_stage1(indices, indice_pairs_uniq, kernelSize, loc_iter, stream);
+    // stage2 依赖 stage1 的 (kv, 输入点) 原始布局, 而 find_unique 是原地 sort+unique,
+    // 会破坏该布局 —— 必须先备份, 否则 stage2 读到的坐标全部错位 (rulebook 连接错乱)
+    nv::Tensor indice_pairs_uniq_backup = indice_pairs_uniq.clone(stream);
     nv::Tensor indicePairUnique_new = find_unique_elements_cuda(indice_pairs_uniq, stream);//挑出tensor中的独立不重复元素,并按照升序排列，indicePairUnique中保存的是vout即输出voxel grid的一维index
     num_act_out = indicePairUnique_new.shape[0];
+    // clean_indices_uniq 用 INT_MAX 初始化整个数组(含 pair_size+1 多出的 1 个元素),
+    // sort+unique 后哨兵恒留在尾部且被计入 count —— 排除它, 否则多出 1 个
+    // 假输出 voxel (哨兵被 inverse 解码成垃圾坐标, 界内则污染输出, 越界则写坏内存)
+    if (num_act_out > 0) num_act_out -= 1;
 
     nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
     nv::Tensor hash_v = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
@@ -424,7 +431,7 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
     pair_mask.fill<uint32_t>(0);
 
     generate_conv_inds_mask_stage2(indices, hash_k, hash_v, indicePairs,
-        indicePairUnique_new, indice_pairs_uniq,
+        indicePairUnique_new, indice_pairs_uniq_backup,
         out_inds, pair_mask, num_act_out, kernelSize, loc_iter, stream);
 
     nv::Tensor mask_argsort = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
