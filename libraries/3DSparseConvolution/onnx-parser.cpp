@@ -24,9 +24,11 @@
 #include "onnx-parser.hpp"
 #include "onnx/onnx-ml.pb.h"
 #include "onnx/onnx-operators-ml.pb.h"
+#include "node_add.hpp"
 #include <fstream>
 #include <numeric>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace spconv{
 
@@ -115,6 +117,19 @@ std::shared_ptr<Engine> load_engine_from_onnx(const std::string& onnx_file, Prec
         tensor_map_by_name[name] = builder->push_input(name);
     }
 
+    // Add+ReLU 融合预处理: 统计每个 tensor 名字作为 node input 被引用的次数,
+    // 以及 graph 直接输出的 tensor 名集合 —— 用于判定 Relu 能否安全下沉进 Add
+    // (仅当 Add 的输出只被该 Relu 消费且不是 graph output 时才可融合,
+    //  否则其他消费者会拿到 ReLU 之后的值而非原始 Add 结果)
+    std::unordered_map<std::string, int> input_ref_count;
+    std::unordered_set<std::string> graph_output_names;
+    for (int i = 0; i < graph.node_size(); ++i) {
+        auto& ref_node = graph.node(i);
+        for (int j = 0; j < ref_node.input_size(); ++j) ++input_ref_count[ref_node.input(j)];
+    }
+    for (int i = 0; i < graph.output_size(); ++i) graph_output_names.insert(graph.output(i).name());
+    std::unordered_map<std::string, spconv::Add*> add_output_map;//Add 输出名 -> Add 节点
+
     std::vector<spconv::SparseDTensor*> collect_outputs;
     for (int i = 0; i < model.graph().node_size(); ++i) {//遍历所有的node，有conv add relu等
         auto& node = model.graph().node(i);//取当前node
@@ -158,15 +173,27 @@ std::shared_ptr<Engine> load_engine_from_onnx(const std::string& onnx_file, Prec
 
             auto n = builder->push_add(
                 node.name(),
-                a, b, 
+                a, b,
                 get_attribute(node, "input0_dynamic_range").f(),
                 get_attribute(node, "input1_dynamic_range").f(),
-                node.output(0), 
+                node.output(0),
                 get_attribute(node, "precision").s() == "int8" ? Precision::Int8 : Precision::Float16,
                 get_attribute(node, "output_precision").s() == "int8" ? Precision::Int8 : Precision::Float16
             );
             tensor_map_by_name[node.output(0)] = n->output(0);
+            add_output_map[node.output(0)] = n;//记录 Add 输出名 -> 节点, 供 Relu 融合判定
         } else if (node.op_type() == "Relu") {
+            // Add+ReLU 融合: 输入来自 Add 且该输出仅被本 Relu 消费、且非 graph output 时,
+            // ReLU 下沉进 Add 节点 (output = max(0, a+b) 一次完成),
+            // 并将 Relu 的输出名映射到 Add 的输出 tensor, 后续消费者拿到正确的拓扑
+            auto fused_it = add_output_map.find(node.input(0));
+            if (fused_it != add_output_map.end() &&
+                input_ref_count[node.input(0)] == 1 &&
+                graph_output_names.find(node.input(0)) == graph_output_names.end()) {
+                fused_it->second->set_relu();
+                tensor_map_by_name[node.output(0)] = fused_it->second->output(0);
+                continue;
+            }
             auto x = tensor_map_by_name[node.input(0)];
             auto n = builder->push_relu(node.name(), x, node.output(0));
             tensor_map_by_name[node.output(0)] = n->output(0);

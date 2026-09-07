@@ -125,11 +125,11 @@ class EngineBuilder{
     return node.get();
   }
 
-  INode* push_add(const std::string& name, SparseDTensor* a, SparseDTensor* b, float a_dynamic_range, float b_dynamic_range,
+  Add* push_add(const std::string& name, SparseDTensor* a, SparseDTensor* b, float a_dynamic_range, float b_dynamic_range,
                   const std::string& output_name, Precision precision, Precision output_precision) {
     std::shared_ptr<INode> node(new Add(name, a, b, a_dynamic_range, b_dynamic_range, output_name, precision, output_precision));
     nodes_.push_back(node);
-    return node.get();
+    return static_cast<Add*>(node.get());
   }
 
   INode* push_relu(const std::string& name, SparseDTensor* x, const std::string& output_name) {
