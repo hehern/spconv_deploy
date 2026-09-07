@@ -88,11 +88,12 @@ void SparseConvolution::forward(void *stream) {
     // std::cout << "add rulebook done" << std::endl;
   }
 
-  // step2:conv计算
-  // nv::Tensor result = indiceConv(input_[0]->features(), weight_, datas[1], datas[2], datas[0].shape[0], submanifold_, stream);
-  // nv::Tensor result = indiceConv2(input_[0]->features(), weight_, datas[1], datas[2], datas[0].shape[0], submanifold_, rulebook_, stream);
-  nv::Tensor result = implicit_gemm(input_[0]->features(), weight2_, datas[1], datas[2], datas[3], datas[4].to_host().at<int32_t>(0), submanifold_, stream);
-  addBiasAndRelu(result, bias_, activation_=="ReLU", stream);
+  // step2:conv计算 (bias + ReLU 已融合进 conv_kernel 的 epilogue:
+  // ConvParams d_is_bias=true -> ConstOutIterator 按 K 维广播读 bias, beta=1, act=ReLU)
+  nv::Tensor result = implicit_gemm(input_[0]->features(), weight2_, datas[1], datas[2], datas[3],
+                                    datas[4].to_host().at<int32_t>(0), submanifold_,
+                                    bias_, activation_ == "ReLU", stream);
+  // addBiasAndRelu(result, bias_, activation_=="ReLU", stream);
 
   // judgeIndicesOutshape(datas[0], out_spatial_shape_, stream);
   // if (name_ == "conv0") {

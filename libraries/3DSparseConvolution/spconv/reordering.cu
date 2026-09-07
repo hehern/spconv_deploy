@@ -189,6 +189,10 @@ void addBiasAndRelu(nv::Tensor features, nv::Tensor bias,
   int numPlanes = features.size(1);//eg:16
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
 
+  // 空帧保护: num_act=0 时 totalThreads=0 -> numBlocks=0,
+  // <<<0, 256>>> 触发 invalid configuration 直接 abort
+  if (num_act <= 0) return;
+
   half* features_ptr = features.ptr<half>();
   half* bias_ptr = bias.ptr<half>();
   // cuda_linear_launch(addBiasAndReluKernel, _stream, num_act, features_ptr, bias_ptr, numPlanes, Relu);

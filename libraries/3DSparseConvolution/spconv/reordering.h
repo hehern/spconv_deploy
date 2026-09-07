@@ -43,12 +43,18 @@ void sparse_scatter_add_all_cuda(nv::Tensor& buffer, nv::Tensor& output,
 void addBiasAndRelu(nv::Tensor features, nv::Tensor bias,
                     bool Relu, void* stream);
 
+// bias 融合版: conv epilogue 直接完成 D = alpha*Accum + bias[k] + ReLU
+// (ConvParams 的 d_is_bias 路径: ConstOutIterator stride=0 按 K 维广播读 bias),
+// 省去单独的 addBiasAndRelu kernel 与一次中间 tensor 读写。
+// bias 为空 tensor 时不加 bias (beta=0); relu 控制是否接 ReLU。
 void implicit_gemm_cuda(nv::Tensor features,
                         nv::Tensor filters,
                         nv::Tensor pair_fwd,
                         nv::Tensor pair_mask_fwd,
                         nv::Tensor mask_argsort_fwd,
                         nv::Tensor out_features,
+                        nv::Tensor bias,
+                        bool relu,
                         void* stream);
 } // namespace spconv
 

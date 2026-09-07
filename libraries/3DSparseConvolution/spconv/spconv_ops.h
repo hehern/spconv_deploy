@@ -61,13 +61,15 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
                            void* stream);
 
 nv::Tensor
-implicit_gemm(nv::Tensor features, 
+implicit_gemm(nv::Tensor features,
               nv::Tensor filters, //格式为eg:权重[16,3*3*3,5]，输出channel kernel_volume 输入channel
-              nv::Tensor indicePairs, 
-              nv::Tensor pair_mask, 
-              nv::Tensor mask_argsort, 
+              nv::Tensor indicePairs,
+              nv::Tensor pair_mask,
+              nv::Tensor mask_argsort,
               int num_activate_out,
-              bool is_subm, 
+              bool is_subm,
+              nv::Tensor bias,   // bias 融合进 conv epilogue (空 tensor 表示无 bias)
+              bool relu,         // epilogue 是否接 ReLU
               void* stream);
 } // namespace spconv
 #endif

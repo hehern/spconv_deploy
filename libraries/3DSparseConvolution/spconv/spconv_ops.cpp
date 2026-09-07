@@ -442,15 +442,17 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
   mask_argsort: shape:{n},对pair_mask进行排序，返回排序后的索引
 */
 nv::Tensor
-implicit_gemm(nv::Tensor features, 
+implicit_gemm(nv::Tensor features,
               nv::Tensor filters, //格式为eg:权重[16,3*3*3,5]，输出channel kernel_volume 输入channel
-              nv::Tensor indicePairs, 
-              nv::Tensor pair_mask, 
-              nv::Tensor mask_argsort, 
+              nv::Tensor indicePairs,
+              nv::Tensor pair_mask,
+              nv::Tensor mask_argsort,
               int num_activate_out,
-              bool is_subm, 
+              bool is_subm,
+              nv::Tensor bias,   // bias 融合进 conv epilogue (空 tensor 表示无 bias)
+              bool relu,         // epilogue 是否接 ReLU
               void* stream) {
-  
+
   int out_channel = filters.shape[0];
   int in_channel = filters.shape[-1];
   int kv = filters.shape[1];
@@ -463,8 +465,9 @@ implicit_gemm(nv::Tensor features,
     out_features.memset(0, stream);
   }
 
-  implicit_gemm_cuda(features, filters, indicePairs, pair_mask, mask_argsort, out_features, stream);
-  
+  implicit_gemm_cuda(features, filters, indicePairs, pair_mask, mask_argsort,
+                     out_features, bias, relu, stream);
+
  return out_features;
 }
 

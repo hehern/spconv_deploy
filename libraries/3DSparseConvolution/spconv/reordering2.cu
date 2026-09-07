@@ -41,8 +41,15 @@ void implicit_gemm_cuda(nv::Tensor features,
                         nv::Tensor pair_mask_fwd,
                         nv::Tensor mask_argsort_fwd,
                         nv::Tensor out_features,
+                        nv::Tensor bias,
+                        bool relu,
                         void* stream) {
     cudaStream_t _stream = static_cast<cudaStream_t>(stream);
+
+    // 空帧保护: numActOut=0 时 grid.x = div_up(0, 64) = 0,
+    // conv_kernel<<<(0,1,1), 128>>> 触发 invalid configuration 直接 abort
+    // (点云数量逐帧波动, 极端帧可能无有效 voxel)
+    if (out_features.size(0) == 0) return;
 
     // 0. 通道对齐检查与 pad (修复 C 非 8 倍数时崩溃的问题)
     //    conv_kernel 全局加载路径 (ld.global.v4.b32 / cp.async.cg 16B) 是 16 字节
@@ -106,8 +113,11 @@ void implicit_gemm_cuda(nv::Tensor features,
     const half* ptr_A = features.ptr<half>();
     const half* ptr_B = filters.ptr<half>();
     half*       ptr_C = out_features.ptr<half>();
-    // ptr_D: source 指针, beta=0 时无意义, 使用 ptr_C 占位
-    const half* ptr_D = ptr_C;
+    // bias 融合: epilogue 的 source = bias (d_is_bias=true 时 ConstOutIterator
+    // stride=0 按 K 维广播, 所有行读 bias[col]), beta=1 即 D = Accum + bias[col] + ReLU。
+    // bias 为空时退回 beta=0 (不加 bias)。
+    bool has_bias = !bias.empty() && bias.numel > 0;
+    const half* ptr_D = has_bias ? bias.ptr<half>() : ptr_C;
 
     const uint32_t* mask_ptr        = pair_mask_fwd.ptr<uint32_t>();
     const int*      mask_argsort_ptr = mask_argsort_fwd.ptr<int>();
@@ -120,19 +130,19 @@ void implicit_gemm_cuda(nv::Tensor features,
         ptr_A,             // 输入特征 (numActIn, C)
         ptr_B,             // 卷积权重 (K, KV, C)
         ptr_C,             // 输出 (numActOut, K)
-        ptr_D,             // source (beta=0 时不使用)
+        ptr_D,             // source: bias (has_bias 时) 或占位
         mask_ptr,          // per-point mask 数据
         mask_argsort_ptr,  // mask argsort 索引
         indice_ptr,        // pair_fwd 位置映射
         mask_filter,       // mask_filter: 选择活跃 kernel 位置
         false,             // reverse_mask
         __float2half(1.0),   // alpha
-        __float2half(0.0),   // beta
-        __float2half(0.0),   // act_alpha
+        __float2half(has_bias ? 1.0 : 0.0),   // beta: 加 bias
+        __float2half(0.0),   // act_alpha (ReLU 不使用)
         __float2half(0.0),   // act_beta
-        Activation::kNone,    // act_type (cumm::conv::Activation)
+        relu ? Activation::kReLU : Activation::kNone,  // act_type
         1,                 // split_k_slices
-        false);            // d_is_bias
+        has_bias);         // d_is_bias: source 按 K 维广播读 bias
 
     // 6. 配置 launch 参数
     // tile_shape = {64, 128, 32}, block = 128 threads, smem = 24576 bytes
