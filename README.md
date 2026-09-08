@@ -1,4 +1,4 @@
-# bevfusion_spconv_deploy
+# spconv_deploy
 
 This repo implements the BEVFusion LiDAR Sparse-Convolution (SCN) backbone as a **self-developed, graph-structured sparse convolution inference engine**, based on [NVIDIA-bevfusion](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution). See [blog](https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501) for details.
 
