@@ -1,12 +1,12 @@
 # bevfusion_spconv_deploy
 
-This repo implements the BEVFusion LiDAR Sparse-Convolution (SCN) backbone as a **self-developed, graph-structured sparse convolution inference engine**, based on NVIDIA-bevfusion (https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution). See blog for details: https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501
+This repo implements the BEVFusion LiDAR Sparse-Convolution (SCN) backbone as a **self-developed, graph-structured sparse convolution inference engine**, based on NVIDIA-bevfusion <!-- (https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution) -->. See blog for details <!-- : https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501 -->.
 
 ## Core Implementation
 
 ### Graph-structured inference engine
 
-Instead of running the sparse convolution model through a commercial inference framework, this repo parses the ONNX model (`lidar.backbone.xyz.onnx`) into a **computational graph** and executes it with its own engine (`libraries/3DSparseConvolution/`):
+Instead of running the sparse convolution model through TensorRT, this repo parses the ONNX model (`lidar.backbone.xyz.onnx`) into a **computational graph** and executes it with its own engine (`libraries/3DSparseConvolution/`):
 
 - `Engine` / `EngineBuilder` (`engine.hpp`): builds the graph from ONNX — input tensor, per-node wiring, output tensor — and drives inference by topologically updating each node.
 - `INode` (`node.hpp`): abstract graph node with a single `forward(stream)` interface. Implemented node types:
@@ -34,24 +34,15 @@ Each `SparseConvolution` node works in two steps (`node_sparseconv.cpp`):
 ### Performance optimizations
 
 - **Best-fit memory pool** (`src/common/tensor.cu`): tensor create/destroy in the hot path reuse pooled device memory instead of bare `cudaMalloc`/`cudaFree` (the latter implicitly syncs the device and drains the GPU pipeline); the pool is pre-filled at startup.
-- **Stream-aware tensor fill** (`Tensor::fill(value, stream)`): fills run on the caller's inference stream instead of the legacy default stream, removing implicit full-pipeline sync points.
-- **Single-pass gather/scatter** and **bias + ReLU fused into the GEMM epilogue**.
-- **Channel alignment** (`C` padded to a multiple of 8) so global loads stay 16-byte vectorized.
-- Rulebook hash lookups via **sort + binary search** instead of O(N²) linear scans.
+- **Single-pass gather/scatter with fused GEMM epilogue**: all input features across every kernel position are gathered into one contiguous buffer; one tensor-core GEMM per kernel position runs on a hand-written WMMA `conv_kernel` (bias + ReLU fused into the epilogue); then all partial results are scatters-added back in a single pass. Compared with the v1.0 per-kernel Gather→GEMM→ScatterAdd loop, the 27 per-kernel gather/scatter passes collapse into one, cutting kernel launches and data movement while keeping the GPU pipeline busy.
 
-## Demonstration
-
-Tag v1.0 ports traveller59/spconv v1.2.1, where each kernel element sequentially executes Gather-Gemm-ScatterAdd with higher latency (open-sourced). Tag v2.0 ports v2.3.8 with fused Gather-Gemm-ScatterAdd (to be open-sourced). This repo currently supports fp16 only.
-<br>
-
-<div align="center">
-  <img src="assets/v1.0.png" alt="v1.0" width="48%" />
-  <img src="assets/v2.0.png" alt="v2.0" width="48%" />
+<div align="center" style="display: flex; justify-content: center; align-items: flex-start; gap: 8px;">
+  <img src="assets/v1.0.png" alt="v1.0" height="300" />
+  <img src="assets/v2.0.png" alt="v2.0" height="300" />
 </div>
 
-<br>
-
-
+- **Channel alignment** (`C` padded to a multiple of 8) so global loads stay 16-byte vectorized.
+- **Sort + binary search** accelerates rulebook generation, replacing the original O(N²) linear scan.
 
 ## Model and Data
 - For quick practice, we provide an example data of nuScenes. You can download it from ( [Google Drive](https://drive.google.com/file/d/1RO493RSWyXbyS12yWk5ZzrixAeZQSnL8/view?usp=sharing) ) or ( [Baidu Drive](https://pan.baidu.com/s/1ED6eospSIF8oIQ2unU9WIQ?pwd=mtvt) ). It contains the following:
@@ -164,8 +155,21 @@ bash tool/build_trt_engine.sh
 bash tool/run.sh
 ```
 
-## Results
-v1.0 CUDA core code performance on RTX3080 compared with NVIDIA SO
+## Performance
+Performance comparison between this repo's implementation and NVIDIA's libspconv.so implementation, tested on an RTX-3080 GPU.
 
-![](assets/results.jpg)
-![](assets/nsight-compute.jpg)
+<div align="center" style="display: flex; justify-content: center; align-items: flex-start; gap: 8px;">
+  <div>
+    <img src="assets/v2.0.0.png" alt="This repo (v2.0.0)" height="400" />
+    <br>This repo (v2.0.0)
+  </div>
+  <div>
+    <img src="assets/nvidia_lib.png" alt="NVIDIA libspconv.so" height="400" />
+    <br>NVIDIA libspconv.so
+  </div>
+</div>
+
+## Acknowledgements
+
+- Thanks to [spconv](https://github.com/traveller59/spconv) for the reference implementation of sparse convolution.
+- Thanks to [NVIDIA-AI-IOT/Lidar_AI_Solution](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution/tree/master/libraries/3DSparseConvolution) for the ONNX export and engine building solution.

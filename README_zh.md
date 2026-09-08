@@ -1,12 +1,12 @@
 # bevfusion_spconv_deploy
 
-本仓库在 NVIDIA-bevfusion（https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution）基础上，将 BEVFusion 的 LiDAR 稀疏卷积（SCN）骨干网络实现为**自研的、基于图结构的稀疏卷积推理引擎**。详见博客：https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501
+本仓库在 NVIDIA-bevfusion <!-- （https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution） --> 基础上，将 BEVFusion 的 LiDAR 稀疏卷积（SCN）骨干网络实现为**自研的、基于图结构的稀疏卷积推理引擎**。详见博客 <!-- ：https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501 -->。
 
 ## 核心实现
 
 ### 图结构推理引擎
 
-本仓库不依赖商业推理框架运行稀疏卷积模型，而是将 ONNX 模型（`lidar.backbone.xyz.onnx`）解析为**计算图**，并用自研引擎（`libraries/3DSparseConvolution/`）执行：
+本仓库不依赖 TensorRT 运行稀疏卷积模型，而是将 ONNX 模型（`lidar.backbone.xyz.onnx`）解析为**计算图**，并用自研引擎（`libraries/3DSparseConvolution/`）执行：
 
 - `Engine` / `EngineBuilder`（`engine.hpp`）：从 ONNX 构建计算图 —— 输入张量、逐节点连接、输出张量，并按拓扑序驱动各节点执行推理。
 - `INode`（`node.hpp`）：抽象图节点，统一 `forward(stream)` 接口。已实现的节点类型：
@@ -34,24 +34,15 @@
 ### 性能优化
 
 - **best-fit 内存池**（`src/common/tensor.cu`）：热路径上的 tensor 创建/销毁复用池化显存，替代裸 `cudaMalloc`/`cudaFree`（后者会隐式同步设备、打断 GPU 流水线）；池在启动时预填。
-- **stream-aware 张量填充**（`Tensor::fill(value, stream)`）：填充在调用方推理流上执行，而非 legacy 默认流，消除隐式全流水线同步点。
-- **单次 gather/scatter**，且 **bias + ReLU 融合进 GEMM epilogue**。
-- **通道对齐**（`C` 补齐到 8 的倍数），保证全局加载保持 16 字节向量化。
-- rulebook 哈希查找用 **sort + 二分查找**，替代 O(N²) 线性扫描。
+- **单次 gather/scatter + GEMM epilogue 融合**：全部卷积核位置的输入特征一次性 gather 到连续缓冲，按卷积核位置逐个执行手写 WMMA tensor-core `conv_kernel`（bias + ReLU 融合进 epilogue），最后一次性 scatter-add 全部部分和。相比 v1.0 逐卷积核的 Gather→GEMM→ScatterAdd 循环，27 次 gather/scatter 合并为 1 次，kernel 启动与数据搬运大幅减少，GPU 流水线保持忙碌。
 
-## 效果演示
-
-v1.0 标签移植 traveller59/spconv v1.2.1，每个卷积核元素顺序执行 Gather-Gemm-ScatterAdd，时延较高（已开源）。v2.0 标签移植 v2.3.8，融合了 Gather-Gemm-ScatterAdd（待开源）。本仓库目前仅支持 fp16。
-<br>
-
-<div align="center">
-  <img src="assets/v1.0.png" alt="v1.0" width="48%" />
-  <img src="assets/v2.0.png" alt="v2.0" width="48%" />
+<div align="center" style="display: flex; justify-content: center; align-items: flex-start; gap: 8px;">
+  <img src="assets/v1.0.png" alt="v1.0" height="300" />
+  <img src="assets/v2.0.png" alt="v2.0" height="300" />
 </div>
 
-<br>
-
-
+- **通道对齐**（`C` 补齐到 8 的倍数），保证全局加载保持 16 字节向量化。
+- **sort + 二分查找** 加快 rulebook 生成效率，替代原 O(N²) 线性扫描。
 
 ## 模型与数据
 - 为便于快速上手，我们提供了 nuScenes 的示例数据，可从（ [Google Drive](https://drive.google.com/file/d/1RO493RSWyXbyS12yWk5ZzrixAeZQSnL8/view?usp=sharing) ）或（ [百度网盘](https://pan.baidu.com/s/1ED6eospSIF8oIQ2unU9WIQ?pwd=mtvt) ）下载，包含：
@@ -163,8 +154,21 @@ bash tool/build_trt_engine.sh
 bash tool/run.sh
 ```
 
-## 结果
-v1.0 CUDA core 代码在 RTX3080 上相比 NVIDIA SO 的性能
+## 性能展示
+本仓库实现与 NVIDIA 的 libspconv.so 实现在 RTX-3080 GPU 上的性能对比。
 
-![](assets/results.jpg)
-![](assets/nsight-compute.jpg)
+<div align="center" style="display: flex; justify-content: center; align-items: flex-start; gap: 8px;">
+  <div>
+    <img src="assets/v2.0.0.png" alt="本仓库实现 (v2.0.0)" height="400" />
+    <br>本仓库实现 (v2.0.0)
+  </div>
+  <div>
+    <img src="assets/nvidia_lib.png" alt="NVIDIA 的 libspconv.so 实现" height="400" />
+    <br>NVIDIA 的 libspconv.so 实现
+  </div>
+</div>
+
+## 致谢
+
+- 感谢 [spconv](https://github.com/traveller59/spconv) 提供的稀疏卷积参考实现。
+- 感谢 [NVIDIA-AI-IOT/Lidar_AI_Solution](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution/tree/master/libraries/3DSparseConvolution) 提供的 ONNX 导出与 engine 构建方案。
