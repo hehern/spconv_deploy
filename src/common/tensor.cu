@@ -24,6 +24,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
 #include <thrust/fill.h>
 #include <string.h>
 
@@ -542,19 +543,19 @@ void Tensor::memset(unsigned char value, void* stream) {
 }
 
 template <typename T>
-void Tensor::fill(const T value) {
+void Tensor::fill(const T value, void* stream) {
   if (this->empty()) return;
 
   if (this->device()) {
     thrust::device_ptr<T> dev_ptr = thrust::device_pointer_cast(this->ptr<T>());
-    thrust::fill(thrust::device, dev_ptr, dev_ptr+this->numel, value);
+    thrust::fill(thrust::cuda::par.on((cudaStream_t)stream), dev_ptr, dev_ptr+this->numel, value);
   } else {
     std::fill(this->ptr<T>(), this->ptr<T>()+this->numel, value);
   }
 }
-template void Tensor::fill<int32_t>(const int32_t);
-template void Tensor::fill<uint32_t>(const uint32_t);
-template void Tensor::fill<half>(const half);
+template void Tensor::fill<int32_t>(const int32_t, void*);
+template void Tensor::fill<uint32_t>(const uint32_t, void*);
+template void Tensor::fill<half>(const half, void*);
 
 Tensor Tensor::loadbinary(const std::string& file, std::vector<int64_t> shape, DataType dtype, bool device) {
   FILE* f = fopen(file.c_str(), "rb");

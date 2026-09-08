@@ -15,7 +15,7 @@ void Relu::forward(void *stream) {
   int64_t voxel_dim = input_[0]->features().shape[1];
 
   nv::Tensor output_buffer = nv::Tensor::create(std::vector<int64_t>{act_num, voxel_dim}, input_[0]->features().dtype(), input_[0]->features().device());
-  output_buffer.fill<half>(__float2half(0.0f));
+  output_buffer.fill<half>(__float2half(0.0f), stream);
   relu_cuda(input_[0]->features(), output_buffer, act_num, voxel_dim, stream);
 
   // step2:调用输出的set_data将结果填充进去

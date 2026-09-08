@@ -99,7 +99,7 @@ getIndicePairs(nv::Tensor indices,
     // std::cout << "not subm" << std::endl;
     // checkRuntime(cudaStreamSynchronize(_stream));
     nv::Tensor indicePairUnique = nv::Tensor::create(std::vector<int64_t>{int64_t(indicePairs.numel / 2) + 1}, nv::DataType::Int32);//N*2*27/2+1
-    indicePairUnique.fill<int32_t>(std::numeric_limits<int32_t>::max());
+    indicePairUnique.fill<int32_t>(std::numeric_limits<int32_t>::max(), stream);
     nv::Tensor outInds = nv::Tensor::create(std::vector<int64_t>{numAct * kernelVolume, coorDim + 1}, nv::DataType::Int32);//{n*27, 4}，这里定义numAct * kernelVolume是因为非子流行卷积输出active voxel个数比输入多，所以这里相当于设置了一个极限最大值
     // outInds.fill<int32_t>(0);
     outInds.memset(0, stream);
@@ -144,7 +144,7 @@ nv::Tensor indiceConv(nv::Tensor features,    // 输入特征(N,inchannel)
   auto indicePairNumCpu = indiceNum.to_host();
   // timer_.start(_stream);
   nv::Tensor output = nv::Tensor::create(std::vector<int64_t>{numActOut, numOutPlanes}, features.dtype(), features.device());
-  output.fill<half>(__float2half(0.0f));
+  output.fill<half>(__float2half(0.0f), _stream);
   // output.memset(0, stream);
   // timer_.stop("tensor fill");
 
@@ -392,7 +392,7 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
     nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);
     nv::Tensor hash_v = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);
     nv::Tensor indicePairs = nv::Tensor::create(std::vector<int64_t>{kernelVolume, numAct}, nv::DataType::Int32);
-    indicePairs.fill<int32_t>(-1);
+    indicePairs.fill<int32_t>(-1, stream);
     
     nv::Tensor pair_mask = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::UInt32);//每个active voxel都与kernel中的哪个元素进行卷积的mask
     generate_subm_conv_inds(indices, hash_k, hash_v, indicePairs,
@@ -423,12 +423,12 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
 
     nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
     nv::Tensor hash_v = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
-    hash_k.fill<int32_t>(std::numeric_limits<int32_t>::max());
+    hash_k.fill<int32_t>(std::numeric_limits<int32_t>::max(), stream);
     nv::Tensor out_inds = nv::Tensor::create(std::vector<int64_t>{num_act_out, indices.shape[1]}, indices.dtype());
     nv::Tensor indicePairs = nv::Tensor::create(std::vector<int64_t>{kernelVolume, num_act_out}, indices.dtype());
-    indicePairs.fill<int32_t>(-1);
+    indicePairs.fill<int32_t>(-1, stream);
     nv::Tensor pair_mask = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::UInt32);
-    pair_mask.fill<uint32_t>(0);
+    pair_mask.fill<uint32_t>(0, stream);
 
     generate_conv_inds_mask_stage2(indices, hash_k, hash_v, indicePairs,
         indicePairUnique_new, indice_pairs_uniq_backup,

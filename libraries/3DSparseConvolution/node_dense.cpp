@@ -23,7 +23,7 @@ void Dense::forward(void *stream) {
   int64_t indices_dim = input_[0]->indices().shape[1];
 
   nv::Tensor output_buffer = nv::Tensor::create(output_shape_, nv::DataType::Float16);
-  output_buffer.fill<half>(__float2half(0.0f));
+  output_buffer.fill<half>(__float2half(0.0f), stream);
   dense_cuda(input_[0]->features(), input_[0]->indices(), output_buffer, act_num, voxel_dim, indices_dim, input_spatial_shape_, stream);
 
   // step2:

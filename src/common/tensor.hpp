@@ -145,7 +145,7 @@ struct Tensor {
   void print(const char* prefix = "Tensor", size_t offset = 0, size_t num_per_line = 10, size_t lines = 1) const;
   void memset(unsigned char value = 0, void* stream = nullptr);
   template <typename T>
-  void fill(const T value);
+  void fill(const T value, void* stream);
   void arange(void* stream = nullptr);
   void release();
   void self_byte_check(size_t type_bytes) const;
