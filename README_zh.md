@@ -1,6 +1,6 @@
 # spconv_deploy
 
-本仓库在 [NVIDIA-bevfusion](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution) 基础上，将 BEVFusion 的 LiDAR 稀疏卷积（SCN）骨干网络实现为**自研的、基于图结构的稀疏卷积推理引擎**。详见 [blog](https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501)。
+本仓库在 [NVIDIA-bevfusion](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution) 基础上，将 BEVFusion 的 LiDAR 稀疏卷积（SCN）骨干网络实现为**基于图结构的稀疏卷积推理引擎**。详见 [blog](https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501)。
 
 ## 核心实现
 
