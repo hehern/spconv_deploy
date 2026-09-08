@@ -17,32 +17,6 @@
 #include "tensor.hpp"
 
 namespace spconv {
-void matrix_multiply_cuda(const nv::Tensor& features, const nv::Tensor& filters, nv::Tensor& output,
-                          int numActOut, int numOutPlanes, int numInPlanes, int filter_offset, 
-                          void* stream);
-void matrix_multiply_cuda(half* features, const nv::Tensor& filters, half* output,
-                          int numActOut, int numOutPlanes, int numInPlanes, int filter_offset, 
-                          void* stream);
-void sparse_gather_cuda(nv::Tensor& buffer, const nv::Tensor& features,
-                        const nv::Tensor& indices, int size, int indice_offset,
-                        void* stream);
-void sparse_scatter_add_cuda(const nv::Tensor& buffer, nv::Tensor& outFeatures,
-                             const nv::Tensor& indices, int size, int indice_offset,
-                             void* stream);
-
-// 批量处理版本 - 将27次循环合并
-void sparse_gather_all_cuda(nv::Tensor& buffer, const nv::Tensor& features,
-                            const nv::Tensor& indices, const int* kernelIds,
-                            const int* kernelOffsets, int numActIn, int totalCount,
-                            void* stream, int kernelVolume);
-void sparse_scatter_add_all_cuda(nv::Tensor& buffer, nv::Tensor& output,
-                                 const nv::Tensor& indices, const int* kernelIds,
-                                 const int* kernelOffsets, int numActIn, int totalCount,
-                                 void* stream, int kernelVolume);
-
-void addBiasAndRelu(nv::Tensor features, nv::Tensor bias,
-                    bool Relu, void* stream);
-
 // bias 融合版: conv epilogue 直接完成 D = alpha*Accum + bias[k] + ReLU
 // (ConvParams 的 d_is_bias 路径: ConstOutIterator stride=0 按 K 维广播读 bias),
 // 省去单独的 addBiasAndRelu kernel 与一次中间 tensor 读写。

@@ -81,7 +81,6 @@ void SparseConvolution::forward(void *stream) {
   if (datas.empty()) {
     // std::cout << "no rulebook" << std::endl;
     // timer_.start(_stream);
-    // datas = getIndicePairs(input_[0]->indices(), out_spatial_shape_, input_spatial_shape_, kernel_size_, stride_, padding_, dilation_, submanifold_, stream);
     datas = getIndicePairsImplicitGemm(input_[0]->indices(), out_spatial_shape_, input_spatial_shape_, kernel_size_, stride_, padding_, dilation_, submanifold_, stream);
     SparseDTensor::add_rulebook(rulebook_, datas);
     // timer_.stop("getIndicePairs done");

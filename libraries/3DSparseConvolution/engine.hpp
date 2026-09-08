@@ -77,7 +77,6 @@ class Engine {
       nodes_[i]->set_is_computed(false);
     }
     SparseDTensor::clear_rulebooks();
-    spconv::clear_indice_cache();
     inputs_[0]->set_data(features_shape, features_dtype, features_data, indices_shape, indices_dtype, indices_data, grid_size, stream);
     outputs_[0]->update(stream);
   }

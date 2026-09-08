@@ -21,34 +21,6 @@
 
 namespace spconv {
 
-
-std::vector<nv::Tensor>
-getIndicePairs(nv::Tensor indices,
-               std::vector<int> outSpatialShape,
-               std::vector<int> spatialShape,
-               std::vector<int> kernelSize, std::vector<int> stride,
-               std::vector<int> padding, std::vector<int> dilation,
-               bool subM, void* stream);
-
-nv::Tensor indiceConv(nv::Tensor features, 
-                      nv::Tensor filters,
-                      nv::Tensor indicePairs, 
-                      nv::Tensor indiceNum,
-                      int64_t numActOut,
-                      bool subM, void* stream);
-
-nv::Tensor indiceConv2(nv::Tensor features, 
-                       nv::Tensor filters,
-                       nv::Tensor indicePairs, 
-                       nv::Tensor indiceNum,
-                       int64_t numActOut,
-                       bool subM,
-                       const std::string &rulebook,
-                       void* stream);
-
-void printFeatures(nv::Tensor features, void* stream);
-void clear_indice_cache();
-
 std::vector<nv::Tensor>
 getIndicePairsImplicitGemm(nv::Tensor indices,
                            std::vector<int> outSpatialShape,
