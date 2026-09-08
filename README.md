@@ -1,8 +1,46 @@
 # bevfusion_spconv_deploy
 
-This repo implements spconv deployment based on NVIDIA-bevfusion (https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution). See blog for details: https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501
+This repo implements the BEVFusion LiDAR Sparse-Convolution (SCN) backbone as a **self-developed, graph-structured sparse convolution inference engine**, based on NVIDIA-bevfusion (https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution). See blog for details: https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501
+
+## Core Implementation
+
+### Graph-structured inference engine
+
+Instead of running the sparse convolution model through a commercial inference framework, this repo parses the ONNX model (`lidar.backbone.xyz.onnx`) into a **computational graph** and executes it with its own engine (`libraries/3DSparseConvolution/`):
+
+- `Engine` / `EngineBuilder` (`engine.hpp`): builds the graph from ONNX — input tensor, per-node wiring, output tensor — and drives inference by topologically updating each node.
+- `INode` (`node.hpp`): abstract graph node with a single `forward(stream)` interface. Implemented node types:
+  - `SparseConvolution` — the core sparse conv (submanifold & stride), with rulebook lookup/generation + implicit GEMM
+  - `Add`, `Relu`, `Dense`, `Reshape`, `Transpose` — supporting ops
+- `SparseDTensor` (`sparse-tensor.hpp`): sparse data flowing between nodes (`features` + `indices` + `grid_size`), with a per-frame **rulebook cache** so convs sharing the same rulebook only compute it once.
+
+Because the engine is a plain graph abstraction over independent operator kernels, it is **portable to non-CUDA ecosystems**: swap the kernel implementations and keep the graph/data-flow layer unchanged.
+
+### Sparse convolution pipeline (rulebook + implicit GEMM)
+
+Each `SparseConvolution` node works in two steps (`node_sparseconv.cpp`):
+
+1. **Rulebook generation** (`getIndicePairsImplicitGemm` in `spconv/spconv_ops.cpp`):
+   - Submanifold conv: hash table over output coordinates, then `sort_by_key` + binary search to avoid the original O(N²) linear scan.
+   - Stride conv: stage-1 kernel writes the output voxel index for every (kernel position, input voxel) pair → sort + unique to get the unique output-voxel list and count → stage-2 kernel builds a hash table and fills the rulebook (input/output index pairs + per-output kernel-position mask) via binary search.
+   - The rulebook is cached in `SparseDTensor` and reused across layers within the same frame.
+2. **Implicit GEMM** (`implicit_gemm_cuda` in `spconv/reordering2.cu`): gathers all input features for every kernel position into one contiguous buffer, runs one GEMM per kernel position with a **hand-written tensor-core `conv_kernel`** (WMMA / cp.async, bias + ReLU fused into the epilogue), then scatters-adds all partial results back — a single gather/scatter instead of one per kernel element.
+
+### Dependencies of the sparse convolution engine
+
+- **No TensorRT, no cuDNN, no CUTLASS** for the sparse convolution engine: the graph engine, rulebook kernels, gather/scatter kernels and the tensor-core GEMM (hand-written WMMA, used for all GEMM paths) are all pure CUDA (SM80+, fp16). Only the CUDA toolkit is required — the build does not reference CUTLASS at all.
+- Camera-side models (camera backbone, view transform, fusion, bbox head) in this BEVFusion repo still run on **TensorRT** engines — they are outside the sparse convolution engine.
+
+### Performance optimizations
+
+- **Best-fit memory pool** (`src/common/tensor.cu`): tensor create/destroy in the hot path reuse pooled device memory instead of bare `cudaMalloc`/`cudaFree` (the latter implicitly syncs the device and drains the GPU pipeline); the pool is pre-filled at startup.
+- **Stream-aware tensor fill** (`Tensor::fill(value, stream)`): fills run on the caller's inference stream instead of the legacy default stream, removing implicit full-pipeline sync points.
+- **Single-pass gather/scatter** and **bias + ReLU fused into the GEMM epilogue**.
+- **Channel alignment** (`C` padded to a multiple of 8) so global loads stay 16-byte vectorized.
+- Rulebook hash lookups via **sort + binary search** instead of O(N²) linear scans.
 
 ## Demonstration
+
 Tag v1.0 ports traveller59/spconv v1.2.1, where each kernel element sequentially executes Gather-Gemm-ScatterAdd with higher latency (open-sourced). Tag v2.0 ports v2.3.8 with fused Gather-Gemm-ScatterAdd (to be open-sourced). This repo currently supports fp16 only.
 <br>
 
@@ -33,6 +71,8 @@ To build bevfusion, we need to depend on the following libraries:
 - libprotobuf-dev == 3.6.1
 - [Compute Capability](https://developer.nvidia.com/cuda-gpus#compute) >= sm_80
 - Python >= 3.6
+
+Note: The sparse convolution engine itself only needs **CUDA (SM80+, fp16)** — TensorRT/CUDNN are required only for the camera-side models.
 
 The data in the performance table was obtained by us on the Nvidia Orin platform, using TensorRT-8.6, cuda-11.4 and cudnn8.6 statistics.
 

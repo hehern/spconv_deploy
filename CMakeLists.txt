@@ -30,7 +30,7 @@ set(arch ${CMAKE_HOST_SYSTEM_PROCESSOR})
 find_package(CUDA REQUIRED)
 find_package(Protobuf REQUIRED)
 
-# For cuda-12 / CUTLASS 4.x (requires C++17)
+# Requires C++17
 set(CMAKE_CXX_FLAGS_RELEASE "-std=c++17 -Wextra -Wall -Wno-missing-field-initializers -Wno-deprecated-declarations -Wno-error=attributes -O3 -DENABLE_TEXT_BACKEND_STB")
 set(CMAKE_CXX_FLAGS_DEBUG   "-std=c++17 -Wno-error=attributes -O0 -g -DENABLE_TEXT_BACKEND_STB")
 
@@ -60,7 +60,6 @@ include_directories(
   dependencies/pybind11/include
   libraries/cuOSD/src
   libraries/3DSparseConvolution
-  $ENV{CUTLASS_Inc}
   src/common
   src/
 )
