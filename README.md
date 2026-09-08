@@ -1,6 +1,6 @@
 # bevfusion_spconv_deploy
 
-This repo implements the BEVFusion LiDAR Sparse-Convolution (SCN) backbone as a **self-developed, graph-structured sparse convolution inference engine**, based on NVIDIA-bevfusion <!-- (https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution) -->. See blog for details <!-- : https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501 -->.
+This repo implements the BEVFusion LiDAR Sparse-Convolution (SCN) backbone as a **self-developed, graph-structured sparse convolution inference engine**, based on [NVIDIA-bevfusion](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution). See [blog](https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501) for details.
 
 ## Core Implementation
 
@@ -36,10 +36,10 @@ Each `SparseConvolution` node works in two steps (`node_sparseconv.cpp`):
 - **Best-fit memory pool** (`src/common/tensor.cu`): tensor create/destroy in the hot path reuse pooled device memory instead of bare `cudaMalloc`/`cudaFree` (the latter implicitly syncs the device and drains the GPU pipeline); the pool is pre-filled at startup.
 - **Single-pass gather/scatter with fused GEMM epilogue**: all input features across every kernel position are gathered into one contiguous buffer; one tensor-core GEMM per kernel position runs on a hand-written WMMA `conv_kernel` (bias + ReLU fused into the epilogue); then all partial results are scatters-added back in a single pass. Compared with the v1.0 per-kernel Gather→GEMM→ScatterAdd loop, the 27 per-kernel gather/scatter passes collapse into one, cutting kernel launches and data movement while keeping the GPU pipeline busy.
 
-<div align="center" style="display: flex; justify-content: center; align-items: flex-start; gap: 8px;">
+<p align="center">
   <img src="assets/v1.0.png" alt="v1.0" height="300" />
   <img src="assets/v2.0.png" alt="v2.0" height="300" />
-</div>
+</p>
 
 - **Channel alignment** (`C` padded to a multiple of 8) so global loads stay 16-byte vectorized.
 - **Sort + binary search** accelerates rulebook generation, replacing the original O(N²) linear scan.
@@ -158,16 +158,12 @@ bash tool/run.sh
 ## Performance
 Performance comparison between this repo's implementation and NVIDIA's libspconv.so implementation, tested on an RTX-3080 GPU.
 
-<div align="center" style="display: flex; justify-content: center; align-items: flex-start; gap: 8px;">
-  <div>
-    <img src="assets/v2.0.0.png" alt="This repo (v2.0.0)" height="400" />
-    <br>This repo (v2.0.0)
-  </div>
-  <div>
-    <img src="assets/nvidia_lib.png" alt="NVIDIA libspconv.so" height="400" />
-    <br>NVIDIA libspconv.so
-  </div>
-</div>
+<table align="center">
+  <tr>
+    <td align="center"><img src="assets/v2.0.0.png" alt="This repo (v2.0.0)" height="400" /><br>This repo (v2.0.0)</td>
+    <td align="center"><img src="assets/nvidia_lib.png" alt="NVIDIA libspconv.so" height="400" /><br>NVIDIA libspconv.so</td>
+  </tr>
+</table>
 
 ## Acknowledgements
 
