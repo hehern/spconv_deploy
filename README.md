@@ -36,13 +36,25 @@ Each `SparseConvolution` node works in two steps (`node_sparseconv.cpp`):
 - **Best-fit memory pool** (`src/common/tensor.cu`): tensor create/destroy in the hot path reuse pooled device memory instead of bare `cudaMalloc`/`cudaFree` (the latter implicitly syncs the device and drains the GPU pipeline); the pool is pre-filled at startup.
 - **Single-pass gather/scatter with fused GEMM epilogue**: all input features across every kernel position are gathered into one contiguous buffer; one tensor-core GEMM per kernel position runs on a hand-written WMMA `conv_kernel` (bias + ReLU fused into the epilogue); then all partial results are scatters-added back in a single pass. Compared with the v1.0 per-kernel Gather→GEMM→ScatterAdd loop, the 27 per-kernel gather/scatter passes collapse into one, cutting kernel launches and data movement while keeping the GPU pipeline busy.
 
-<p align="center">
-  <img src="assets/v1.0.png" alt="v1.0" height="300" />
-  <img src="assets/v2.0.png" alt="v2.0" height="300" />
-</p>
+<table align="center">
+  <tr>
+    <td align="center"><img src="assets/v1.0.png" alt="v1.0" height="300" /></td>
+    <td align="center"><img src="assets/v2.0.png" alt="v2.0" height="300" /></td>
+  </tr>
+</table>
 
 - **Channel alignment** (`C` padded to a multiple of 8) so global loads stay 16-byte vectorized.
 - **Sort + binary search** accelerates rulebook generation, replacing the original O(N²) linear scan.
+
+## Performance
+Performance comparison between this repo's implementation and NVIDIA's libspconv.so implementation, tested on an RTX-3080 GPU.
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="assets/v2.0.0.png" alt="This repo (v2.0.0)" height="400" /><br>This repo (v2.0.0)</td>
+    <td align="center"><img src="assets/nvidia_lib.png" alt="NVIDIA libspconv.so" height="400" /><br>NVIDIA libspconv.so</td>
+  </tr>
+</table>
 
 ## Model and Data
 - For quick practice, we provide an example data of nuScenes. You can download it from ( [Google Drive](https://drive.google.com/file/d/1RO493RSWyXbyS12yWk5ZzrixAeZQSnL8/view?usp=sharing) ) or ( [Baidu Drive](https://pan.baidu.com/s/1ED6eospSIF8oIQ2unU9WIQ?pwd=mtvt) ). It contains the following:
@@ -154,16 +166,6 @@ bash tool/build_trt_engine.sh
 ```bash
 bash tool/run.sh
 ```
-
-## Performance
-Performance comparison between this repo's implementation and NVIDIA's libspconv.so implementation, tested on an RTX-3080 GPU.
-
-<table align="center">
-  <tr>
-    <td align="center"><img src="assets/v2.0.0.png" alt="This repo (v2.0.0)" height="400" /><br>This repo (v2.0.0)</td>
-    <td align="center"><img src="assets/nvidia_lib.png" alt="NVIDIA libspconv.so" height="400" /><br>NVIDIA libspconv.so</td>
-  </tr>
-</table>
 
 ## Acknowledgements
 

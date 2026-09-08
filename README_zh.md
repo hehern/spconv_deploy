@@ -36,13 +36,25 @@
 - **best-fit 内存池**（`src/common/tensor.cu`）：热路径上的 tensor 创建/销毁复用池化显存，替代裸 `cudaMalloc`/`cudaFree`（后者会隐式同步设备、打断 GPU 流水线）；池在启动时预填。
 - **单次 gather/scatter + GEMM epilogue 融合**：全部卷积核位置的输入特征一次性 gather 到连续缓冲，按卷积核位置逐个执行手写 WMMA tensor-core `conv_kernel`（bias + ReLU 融合进 epilogue），最后一次性 scatter-add 全部部分和。相比 v1.0 逐卷积核的 Gather→GEMM→ScatterAdd 循环，27 次 gather/scatter 合并为 1 次，kernel 启动与数据搬运大幅减少，GPU 流水线保持忙碌。
 
-<p align="center">
-  <img src="assets/v1.0.png" alt="v1.0" height="300" />
-  <img src="assets/v2.0.png" alt="v2.0" height="300" />
-</p>
+<table align="center">
+  <tr>
+    <td align="center"><img src="assets/v1.0.png" alt="v1.0" height="300" /></td>
+    <td align="center"><img src="assets/v2.0.png" alt="v2.0" height="300" /></td>
+  </tr>
+</table>
 
 - **通道对齐**（`C` 补齐到 8 的倍数），保证全局加载保持 16 字节向量化。
 - **sort + 二分查找** 加快 rulebook 生成效率，替代原 O(N²) 线性扫描。
+
+## 性能展示
+本仓库实现与 NVIDIA 的 libspconv.so 实现在 RTX-3080 GPU 上的性能对比。
+
+<table align="center">
+  <tr>
+    <td align="center"><img src="assets/v2.0.0.png" alt="本仓库实现 (v2.0.0)" height="400" /><br>本仓库实现 (v2.0.0)</td>
+    <td align="center"><img src="assets/nvidia_lib.png" alt="NVIDIA 的 libspconv.so 实现" height="400" /><br>NVIDIA 的 libspconv.so 实现</td>
+  </tr>
+</table>
 
 ## 模型与数据
 - 为便于快速上手，我们提供了 nuScenes 的示例数据，可从（ [Google Drive](https://drive.google.com/file/d/1RO493RSWyXbyS12yWk5ZzrixAeZQSnL8/view?usp=sharing) ）或（ [百度网盘](https://pan.baidu.com/s/1ED6eospSIF8oIQ2unU9WIQ?pwd=mtvt) ）下载，包含：
@@ -153,16 +165,6 @@ bash tool/build_trt_engine.sh
 ```bash
 bash tool/run.sh
 ```
-
-## 性能展示
-本仓库实现与 NVIDIA 的 libspconv.so 实现在 RTX-3080 GPU 上的性能对比。
-
-<table align="center">
-  <tr>
-    <td align="center"><img src="assets/v2.0.0.png" alt="本仓库实现 (v2.0.0)" height="400" /><br>本仓库实现 (v2.0.0)</td>
-    <td align="center"><img src="assets/nvidia_lib.png" alt="NVIDIA 的 libspconv.so 实现" height="400" /><br>NVIDIA 的 libspconv.so 实现</td>
-  </tr>
-</table>
 
 ## 致谢
 
