@@ -175,6 +175,13 @@ struct Tensor {
   static void pool_prime();
 };
 
+// 供 thrust/cub 等第三方库临时缓冲接入设备内存池 (见 tensor.cu MemoryPool)。
+// indice.cu 的 sort/sort_by_key/unique 通过 PooledDeviceAllocator 走此接口,
+// 避免每帧 ~30 次 cudaMalloc/cudaFree (cudaFree 隐式同步会打断 kernel 流水线)。
+// 注意: 池非 stream-aware, 调用方需保证分配/归还在同一推理流上。
+void* pool_acquire_device(size_t bytes);
+void pool_release_device(void* ptr, size_t bytes);
+
 };  // namespace nv
 
 #endif  // __TENSOR_HPP__

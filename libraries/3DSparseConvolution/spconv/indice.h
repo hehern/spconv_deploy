@@ -21,7 +21,24 @@ namespace spconv {
 
 #define divup(a, b) ((static_cast<int>(a) + static_cast<int>(b) - 1) / static_cast<int>(b))
 
-nv::Tensor find_unique_elements_cuda(nv::Tensor& src_tensor, void* stream);
+// 网格体积所需位数: 索引范围 [0, vol), 需 2^bits >= vol, 即 bits = ceil(log2(vol))。
+// 注意不能用 floor(log2): 少 1 位会漏掉最高位索引, 排序错序 (实测 [720,720,21] 返回 23
+// 而应 24, 导致检测异常)。
+inline int voxel_index_bits(const std::vector<int>& grid) {
+  int64_t vol = 1;
+  for (int d : grid) vol *= d;
+  int bits = 0;
+  int64_t cap = 1;
+  while (cap < vol) {
+    cap <<= 1;
+    ++bits;
+  }
+  return bits;
+}
+
+// bits: 排序键有效位数 (voxel 索引=网格体积位数, mask= kernelVolume),
+// 传 0 表示 32 位全量排序。限位可减少 cub radix sort 的 pass 数。
+nv::Tensor find_unique_elements_cuda(nv::Tensor& src_tensor, int bits, void* stream);
 
 int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k, 
                             nv::Tensor hashdata_v, nv::Tensor indice_pairs,
@@ -29,7 +46,7 @@ int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k,
                             nv::Tensor indice_pair_mask, 
                             ConvOutLocIter& loc_iter, void* stream);
 
-nv::Tensor sort_1d_by_key_allocator_v2(nv::Tensor data, nv::Tensor indices, void* stream);
+nv::Tensor sort_1d_by_key_allocator_v2(nv::Tensor data, nv::Tensor indices, int bits, void* stream);
 
 void generate_conv_inds_mask_stage1(nv::Tensor indices, 
                                     nv::Tensor indice_pairs_uniq,

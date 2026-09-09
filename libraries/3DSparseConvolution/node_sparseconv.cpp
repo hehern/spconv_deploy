@@ -89,8 +89,11 @@ void SparseConvolution::forward(void *stream) {
 
   // step2:conv计算 (bias + ReLU 已融合进 conv_kernel 的 epilogue:
   // ConvParams d_is_bias=true -> ConstOutIterator 按 K 维广播读 bias, beta=1, act=ReLU)
+  // numActOut 在 host 侧已知 = datas[0].shape[0] (stride 层是 out_inds、subm 层是 indices 的 shape,
+  // getIndicePairsImplicitGemm 中两者恒等于 numActOut)。不要用 datas[4].to_host() 同步读 ——
+  // 那个 DtoH+cudaStreamSynchronize 每层都会排空整条流水线, 是 GPU 空闲(约1.17ms)的主要来源。
   nv::Tensor result = implicit_gemm(input_[0]->features(), weight2_, datas[1], datas[2], datas[3],
-                                    datas[4].to_host().at<int32_t>(0), submanifold_,
+                                    (int)datas[0].shape[0], submanifold_,
                                     bias_, activation_ == "ReLU", stream);
   // addBiasAndRelu(result, bias_, activation_=="ReLU", stream);
 

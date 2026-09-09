@@ -69,27 +69,25 @@ void transpose_cuda(nv::Tensor features, nv::Tensor indices, nv::Tensor output,
   // printf("\n");
 }
 
-__global__ void transposeKernel2D(int nx, int ny, int nz, const half* input, half* output, 
-  int channel, int dim_x, int dim_y, int dim_z, int start_y) {
-// 计算线程的二维索引
-int x = cuda_2d_x; // 当前线程的 x 坐标
-int y = cuda_2d_y + start_y; // 当前线程的 y 坐标
-
-// 确保线程索引不越界
-if (x >= nx || y >= dim_x * dim_y * dim_z) return;
-
-// 计算输入张量的高维索引
-int z = y % dim_z; // 取出 z 维度
-int y_idx = (y / dim_z) % dim_y; // 取出 y 维度
-int x_idx = (y / (dim_z * dim_y)) % dim_x; // 取出 x 维度
-int c = x % channel; // 通道索引
-
-// 计算输入和输出的一维索引
-int input_idx = ((c * dim_x + x_idx) * dim_y + y_idx) * dim_z + z;
-int output_idx = ((c * dim_z + z) * dim_x + x_idx) * dim_y + y_idx;
-
-// 数据从输入张量复制到输出张量
-output[output_idx] = input[input_idx];
+// 合并访存的稠密 BEV 转置: [C, X, Y, Z](Z最内) -> [C, Z, X, Y](Y最内)。
+// 原 transposeKernel2D 每个线程一个元素、线程沿 channel 维排列, 读写都按 X*Y*Z
+// 大步长(非合并, 实测 16.59MB 转置 472us, 有效带宽仅 ~35GB/s)。
+// 新实现每个线程负责一个 (c,x,y) 位置的 Z 个元素, 连续线程=连续 y:
+//   读: input[((c*X+x)*Y+y)*Z + z] 连续线程读连续 Z 元素 (合并)
+//   写: output[((c*Z+z)*X+x)*Y+y]  每个 z 一行、连续线程写连续 Y (合并)
+__global__ void transposeKernel2DV2(long num, const half* input, half* output,
+                                    int channel, int dim_x, int dim_y, int dim_z) {
+  int idx = cuda_linear_index;
+  if (idx >= num) return;
+  int y = idx % dim_y;
+  int x = (idx / dim_y) % dim_x;
+  int c = idx / (dim_y * dim_x);
+  const half* in = input + ((c * dim_x + x) * dim_y + y) * dim_z;
+  half* out = output + (c * dim_z) * (dim_x * dim_y) + x * dim_y + y;
+  #pragma unroll
+  for (int z = 0; z < dim_z; ++z) {
+    out[z * (dim_x * dim_y)] = in[z];
+  }
 }
 
 void transpose_with_cuda(nv::Tensor features, 
@@ -107,14 +105,9 @@ void transpose_with_cuda(nv::Tensor features,
 
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
 
-  int max_y = 65535 * 32; // CUDA 网格 y 方向的最大线程数
-  int total_y = dim_x * dim_y * dim_z;
-  for (int start_y = 0; start_y < total_y; start_y += max_y) {
-    int current_y = min(max_y, total_y - start_y);
-    cuda_2d_launch(transposeKernel2D, _stream, channel, current_y, 1, 
-                   input0_ptr, output_ptr, 
-                   channel, dim_x, dim_y, dim_z, start_y);
-  }
+  cuda_linear_launch(transposeKernel2DV2, _stream,
+                     (int64_t)channel * dim_x * dim_y,
+                     input0_ptr, output_ptr, channel, dim_x, dim_y, dim_z);
 }
 
 

@@ -104,15 +104,21 @@ struct MemoryPool {
   // (conv 输出 numAct*K*2B ≈ 1~12MB, rulebook 27*numAct*4B ≈ 5~8MB,
   //  hash/argsort/mask ≈ 0.2~0.3MB, bias/relu 输出同量级),
   // best-fit 下这些请求全部命中预填块, 第一帧不再有池冷启动分配。
+  // 2026-09-10 实测 (SPCONV_POOL_DUMP): 8MB 桶原 8 块被 4~6MB 规则簿 tensor
+  // (帧内同时存活 8+) + thrust 排序临时缓冲耗尽 → miss; dense/transpose 输出
+  // 16.59MB > 16MB 块, best-fit 无法命中 → 必 miss。故 8MB 加到 24 块并新增 24MB 档。
+  // (同会话对比: 补档后 cudaMalloc 7→0, 空闲 -0.14ms, 窗口 -0.13ms; 早期观察到的
+  //  索引 kernel +120µs 差异经 state8 回退实验确认是机器状态漂移, 与补档无关。)
   void prime_device() {
     const std::pair<size_t, int> plan[] = {
         {64ull << 10, 16},    //  64KB ×16 =   1MB
         {256ull << 10, 16},   // 256KB ×16 =   4MB
         {1ull << 20, 16},     //   1MB ×16 =  16MB
         {4ull << 20, 12},     //   4MB ×12 =  48MB
-        {8ull << 20, 8},      //   8MB ×8  =  64MB
+        {8ull << 20, 24},     //   8MB ×24 = 192MB
         {16ull << 20, 8},     //  16MB ×8  = 128MB
-    };                        // 合计约 260MB
+        {24ull << 20, 4},     //  24MB ×4  =  96MB  (覆盖 16.59MB dense/transpose 输出)
+    };                        // 合计约 485MB
     std::lock_guard<std::mutex> lock(mutex);
     for (auto& item : plan) {
       auto& bucket = device_blocks[item.first];
@@ -128,6 +134,10 @@ MemoryPool& memory_pool() {
   return inst;
 }
 }  // namespace
+
+// 第三方库 (thrust/cub) 临时缓冲接入内存池的公共入口, 语义与 TensorData::create/free 一致。
+void* pool_acquire_device(size_t bytes) { return memory_pool().acquire(bytes, true); }
+void pool_release_device(void* ptr, size_t bytes) { memory_pool().release(ptr, bytes, true); }
 
 #define DISPATCH_BY_TYPES(dtype, ...)                  \
   [&]() {                                              \

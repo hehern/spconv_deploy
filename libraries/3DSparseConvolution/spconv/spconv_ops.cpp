@@ -48,7 +48,7 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
         spatialShape, kernelSize, pair_mask, loc_iter, stream);
 
     nv::Tensor mask_argsort = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);
-    sort_1d_by_key_allocator_v2(pair_mask, mask_argsort, stream);//对pair_mask进行排序，返回排序后的索引
+    sort_1d_by_key_allocator_v2(pair_mask, mask_argsort, kernelVolume, stream);//对pair_mask进行排序，返回排序后的索引
 
     nv::Tensor numActOut = nv::Tensor::create(std::vector<int64_t>{1}, nv::DataType::Int32, false);
     numActOut.ptr<int32_t>()[0] = num_act_out;
@@ -60,10 +60,16 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
     nv::Tensor indice_pairs_uniq = nv::Tensor::create(std::vector<int64_t>{pair_size + 1}, nv::DataType::Int32);
 
     generate_conv_inds_mask_stage1(indices, indice_pairs_uniq, kernelSize, loc_iter, stream);
-    // stage2 依赖 stage1 的 (kv, 输入点) 原始布局, 而 find_unique 是原地 sort+unique,
-    // 会破坏该布局 —— 必须先备份, 否则 stage2 读到的坐标全部错位 (rulebook 连接错乱)
-    nv::Tensor indice_pairs_uniq_backup = indice_pairs_uniq.clone(stream);
-    nv::Tensor indicePairUnique_new = find_unique_elements_cuda(indice_pairs_uniq, stream);//挑出tensor中的独立不重复元素,并按照升序排列，indicePairUnique中保存的是vout即输出voxel grid的一维index
+    // stage2 依赖 stage1 的 (kv, 输入点) 原始布局。find_unique 现把排序结果写入
+    // scratch (见 indice.cu), 不再就地破坏 indice_pairs_uniq —— 备份实际已冗余,
+    // 暂保留作防御, 后续可移除省一次 DtoD 拷贝。
+    // 用异步 DtoD 拷贝代替 clone(): clone() 内部 cudaStreamSynchronize 会排空流水线
+    // (这是 stride 规则簿区间 ~120us 空洞的主要来源); 备份只被 stage2 在同一流上消费,
+    // 流序已保证其先于 sort+unique 完成, 无需 host 同步
+    nv::Tensor indice_pairs_uniq_backup =
+        nv::Tensor::create(indice_pairs_uniq.shape, indice_pairs_uniq.dtype(), indice_pairs_uniq.device());
+    indice_pairs_uniq_backup.copy_from_device(indice_pairs_uniq.ptr(), stream);
+    nv::Tensor indicePairUnique_new = find_unique_elements_cuda(indice_pairs_uniq, voxel_index_bits(outSpatialShape), stream);//挑出tensor中的独立不重复元素,并按照升序排列，indicePairUnique中保存的是vout即输出voxel grid的一维index
     num_act_out = indicePairUnique_new.shape[0];
     // clean_indices_uniq 用 INT_MAX 初始化整个数组(含 pair_size+1 多出的 1 个元素),
     // sort+unique 后哨兵恒留在尾部且被计入 count —— 排除它, 否则多出 1 个
@@ -84,7 +90,7 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
         out_inds, pair_mask, num_act_out, kernelSize, loc_iter, stream);
 
     nv::Tensor mask_argsort = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
-    sort_1d_by_key_allocator_v2(pair_mask, mask_argsort, stream);
+    sort_1d_by_key_allocator_v2(pair_mask, mask_argsort, kernelVolume, stream);
     nv::Tensor numActOut = nv::Tensor::create(std::vector<int64_t>{1}, nv::DataType::Int32, false);
     numActOut.ptr<int32_t>()[0] = num_act_out;
     return {out_inds, indicePairs, pair_mask, mask_argsort, numActOut};

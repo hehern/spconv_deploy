@@ -16,6 +16,7 @@
 #include <thrust/execution_policy.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+#include <cub/cub.cuh>
 #include <type_traits>
 #include <cuda_runtime.h>
 #include <iostream>
@@ -24,8 +25,92 @@
 
 namespace spconv {
 
+// ===== thrust 临时缓冲内存池 =====
+// thrust::sort / sort_by_key / unique 内部 (cub) 每帧会为临时存储分配 ~30 次
+// cudaMalloc/cudaFree; cudaFree 隐式同步设备, 打断 kernel 流水线产生 GPU 空闲。
+// 这里把 thrust 临时缓冲接到 nv::Tensor 的全局 best-fit 内存池 (tensor.cu MemoryPool),
+// 帧间复用块, 稳态下临时分配零 cudaMalloc/cudaFree。
+// 注意: 池非 stream-aware, 依赖本库所有 thrust 调用运行在同一推理流上
+// (与 nv::Tensor 池用法一致, 同流串行保证复用安全)。
+template <typename T>
+struct PooledDeviceAllocator {
+  using value_type = T;
+  using pointer = T*;
+  using const_pointer = const T*;
+  using reference = T&;
+  using const_reference = const T&;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  template <typename U>
+  struct rebind {
+    using other = PooledDeviceAllocator<U>;
+  };
+  PooledDeviceAllocator() = default;
+  template <typename U>
+  PooledDeviceAllocator(const PooledDeviceAllocator<U>&) {}
+  T* allocate(std::ptrdiff_t n) {
+    if (n <= 0) return nullptr;
+    size_t bytes = static_cast<size_t>(n) * sizeof(T);
+    void* p = nv::pool_acquire_device(bytes);
+    if (p == nullptr) {  // 池不可用(超大/未初始化)时退回裸 cudaMalloc
+      checkRuntime(cudaMalloc(&p, bytes));
+    }
+    return static_cast<T*>(p);
+  }
+  void deallocate(T* p, std::ptrdiff_t n) {
+    if (n <= 0) return;
+    nv::pool_release_device(p, static_cast<size_t>(n) * sizeof(T));
+  }
+};
 
-nv::Tensor find_unique_elements_cuda(nv::Tensor& src_tensor, void* stream) {
+// cub 排序临时缓冲: 从全局 best-fit 池取用, 析构归还 (与 thrust 池一致)。
+// 排序为流上异步操作, 归还后同流复用安全。
+struct CubSortTemp {
+  void* ptr = nullptr;
+  size_t bytes = 0;
+  ~CubSortTemp() {
+    if (ptr) nv::pool_release_device(ptr, bytes);
+  }
+  void* get(size_t need) {
+    if (ptr && bytes >= need) return ptr;
+    if (ptr) nv::pool_release_device(ptr, bytes);
+    bytes = need;
+    ptr = nv::pool_acquire_device(bytes);
+    if (ptr == nullptr) checkRuntime(cudaMalloc(&ptr, bytes));  // 池不可用时退回
+    return ptr;
+  }
+};
+
+// 网格体积所需位数: 保证所有 voxel 1D 索引 < 2^bits (定义见 indice.h, inline)
+
+// 限位基数排序 (cub, keys+values 就地): 排序键只需 bits 位 (voxel 索引/mask),
+// 远小于 32 位, 减少 radix pass 数。cub 经典 API 需独立 in/out 缓冲, 这里用
+// 池分配的备用缓冲做 DoubleBuffer, 结果若落在备用缓冲则拷回 (与 thrust 内部一致)。
+// 语义与 thrust::sort_by_key 完全相同, 仅额外支持 begin/end_bit。
+template <typename KeyT, typename ValueT>
+static void radix_sort_pairs(KeyT* keys, ValueT* vals, int n, int bits, void* stream) {
+  cudaStream_t s = static_cast<cudaStream_t>(stream);
+  size_t key_bytes = sizeof(KeyT) * n, val_bytes = sizeof(ValueT) * n;
+  void* sk = nv::pool_acquire_device(key_bytes);
+  void* sv = nv::pool_acquire_device(val_bytes);
+  if (sk == nullptr) checkRuntime(cudaMalloc(&sk, key_bytes));
+  if (sv == nullptr) checkRuntime(cudaMalloc(&sv, val_bytes));
+  cub::DoubleBuffer<KeyT> dk(keys, static_cast<KeyT*>(sk));
+  cub::DoubleBuffer<ValueT> dv(vals, static_cast<ValueT*>(sv));
+  size_t temp_bytes = 0;
+  checkRuntime(cub::DeviceRadixSort::SortPairs(nullptr, temp_bytes, dk, dv, n, 0, bits, s));
+  CubSortTemp temp;
+  checkRuntime(cub::DeviceRadixSort::SortPairs(temp.get(temp_bytes), temp_bytes, dk, dv, n, 0, bits, s));
+  if (dk.Current() != keys)
+    checkRuntime(cudaMemcpyAsync(keys, dk.Current(), key_bytes, cudaMemcpyDeviceToDevice, s));
+  if (dv.Current() != vals)
+    checkRuntime(cudaMemcpyAsync(vals, dv.Current(), val_bytes, cudaMemcpyDeviceToDevice, s));
+  nv::pool_release_device(sk, key_bytes);
+  nv::pool_release_device(sv, val_bytes);
+}
+
+
+nv::Tensor find_unique_elements_cuda(nv::Tensor& src_tensor, int bits, void* stream) {
 
   int64_t num = src_tensor.shape[0];
   if (num == 0) {
@@ -35,18 +120,34 @@ nv::Tensor find_unique_elements_cuda(nv::Tensor& src_tensor, void* stream) {
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
 
   int* begin = src_tensor.ptr<int>();
-  int* end = begin + num;
 
-  // stream-aware sort + unique: 用thrust::cuda::par.on避免默认流同步
-  auto policy = thrust::cuda::par.on(_stream);
-  thrust::sort(policy, begin, end);
-  int* unique_end = thrust::unique(policy, begin, end);
+  // 限位基数排序 (cub, 只排 bits 位而非 32 位): voxel 索引 < 2^bits,
+  // 减少 radix pass 数 (32bit=8 pass, 24bit=6 pass); INT_MAX 哨兵的高位相同,
+  // 低位全 1 保证仍排到末尾, 排序语义不变。结果写入池分配的 scratch (非就位),
+  // 不破坏 src_tensor 原始布局 (indice_pairs_uniq 的备份因此也不再被破坏)。
+  size_t key_bytes = (size_t)num * sizeof(int);
+  void* scratch = nv::pool_acquire_device(key_bytes);
+  if (scratch == nullptr) checkRuntime(cudaMalloc(&scratch, key_bytes));
+  size_t temp_bytes = 0;
+  checkRuntime(cub::DeviceRadixSort::SortKeys(nullptr, temp_bytes, begin, (int*)scratch, (int)num, 0, bits, _stream));
+  CubSortTemp temp;
+  checkRuntime(cub::DeviceRadixSort::SortKeys(temp.get(temp_bytes), temp_bytes, begin, (int*)scratch, (int)num, 0, bits, _stream));
+
+  // unique 是单 pass, 保留 thrust (走池), 直接在已排序的 scratch 上做
+  PooledDeviceAllocator<int> pool_alloc;
+  auto policy = thrust::cuda::par(pool_alloc).on(_stream);
+  int* unique_end = thrust::unique(policy, (int*)scratch, (int*)scratch + num);
 
   checkRuntime(cudaStreamSynchronize(_stream));
 
-  int64_t unique_count = unique_end - begin;
-  return nv::Tensor::from_data(
-    begin, std::vector<int64_t>{unique_count}, nv::DataType::Int32);
+  int64_t unique_count = unique_end - (int*)scratch;
+  // 必须传 _stream: from_data 的 stream 参数默认是 nullptr(默认流),
+  // 否则这里 DtoD 的 cudaMemcpyAsync 会落到默认流, 破坏推理流的顺序语义
+  nv::Tensor out = nv::Tensor::from_data(
+    scratch, std::vector<int64_t>{unique_count}, nv::DataType::Int32, true, _stream);
+  // 拷贝已在流上入队, 归还 scratch 到池 (同流复用安全)
+  nv::pool_release_device(scratch, key_bytes);
+  return out;
 }
 
 
@@ -90,12 +191,9 @@ int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k,
   // hash 表按 key 升序排序 (value 跟随), 使 calc_subm_conv_indices_mask 可用二分查找。
   // 原实现为无序表 + 线性扫描, 查找复杂度 O(N^2 * RS) (subm2 层约 780 亿次比较/帧),
   // 排序 + 二分后降为 O(N log N + N * RS * log N), 是 Lidar Backbone 的主要耗时来源。
-  {
-    thrust::device_ptr<int> ptr_sort_k(hashdata_k_ptr);
-    thrust::device_ptr<int> ptr_sort_v(hashdata_v_ptr);
-    auto thrust_ctx = thrust::cuda::par.on(_stream);
-    thrust::sort_by_key(thrust_ctx, ptr_sort_k, ptr_sort_k + numActIn, ptr_sort_v);
-  }
+  // 限位基数排序 (只排 voxel 索引位数, 非 32 位), 备用缓冲走 best-fit 池。
+  radix_sort_pairs<int, int>(hashdata_k_ptr, hashdata_v_ptr, numActIn,
+                             voxel_index_bits(input_dims), stream);
   // checkRuntime(cudaStreamSynchronize(_stream));
   // std::cout << "buildSubmConvHashTable!" << std::endl;
   uint32_t* indice_pair_mask_ptr = indice_pair_mask.ptr<uint32_t>();
@@ -113,6 +211,7 @@ int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k,
 
 nv::Tensor sort_1d_by_key_allocator_v2(nv::Tensor data,
                                        nv::Tensor indices,
+                                       int bits,
                                        void* stream) {
 
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
@@ -125,10 +224,8 @@ nv::Tensor sort_1d_by_key_allocator_v2(nv::Tensor data,
   uint32_t* data_ptr = data.ptr<uint32_t>();
   cuda_linear_launch(arange_kernel<int32_t>, _stream, numActIn, indicesIn_ptr);//0-numActIn-1
 
-  thrust::device_ptr<uint32_t> ptr_tr(data_ptr);
-  thrust::device_ptr<int32_t> ptr_k(indicesIn_ptr);
-  auto thrust_ctx = thrust::cuda::par.on(_stream);
-  thrust::sort_by_key(thrust_ctx, ptr_tr, ptr_tr + numActIn, ptr_k);//按照mask的大小顺序升序排列indicesIn_ptr
+  // 限位基数排序: pair_mask 只需 kernelVolume 位 (非 32), 减少 cub pass 数
+  radix_sort_pairs<uint32_t, int32_t>(data_ptr, indicesIn_ptr, numActIn, bits, stream);//按照mask的大小顺序升序排列indicesIn_ptr
 
   return indices;
 }
