@@ -51,7 +51,7 @@ Performance comparison between this repo's implementation and NVIDIA's libspconv
 
 <table align="center">
   <tr>
-    <td align="center"><img src="assets/v2.0.0.png" alt="This repo (v2.0.0)" height="400" /><br>This repo (v2.0.0)</td>
+    <td align="center"><img src="assets/v2.0.1.png" alt="This repo (v2.0.1)" height="400" /><br>This repo (v2.0.1)</td>
     <td align="center"><img src="assets/nvidia_lib.png" alt="NVIDIA libspconv.so" height="400" /><br>NVIDIA libspconv.so</td>
   </tr>
 </table>
