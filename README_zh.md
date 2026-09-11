@@ -51,8 +51,8 @@
 
 <table align="center">
   <tr>
-    <td align="center"><img src="assets/v2.0.1.png" alt="本仓库实现 (v2.0.1)" height="400" /><br>本仓库实现 (v2.0.1)</td>
-    <td align="center"><img src="assets/nvidia_lib.png" alt="NVIDIA 的 libspconv.so 实现" height="400" /><br>NVIDIA 的 libspconv.so 实现</td>
+    <td align="center"><img src="assets/v2.0.2.png" alt="本仓库实现 (v2.0.2)" height="400" /><br>本仓库实现 (v2.0.2)</td>
+    <td align="center"><img src="assets/nvidia_lib2.png" alt="NVIDIA 的 libspconv.so 实现" height="400" /><br>NVIDIA 的 libspconv.so 实现</td>
   </tr>
 </table>
 
