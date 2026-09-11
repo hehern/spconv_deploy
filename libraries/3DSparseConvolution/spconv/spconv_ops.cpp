@@ -38,8 +38,11 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
   if (subm) {
     num_act_out = numAct;
 
-    nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);
-    nv::Tensor hash_v = nv::Tensor::create(std::vector<int64_t>{numAct}, nv::DataType::Int32);
+    // hash_k/v 作为线性哈希表 (generate_subm_conv_inds 的单 cooperative kernel 使用):
+    // key=voxel 1D 索引, value=voxel id。按 >=2x numAct 分配, 负载<=0.5 保证线性探测效率
+    int hash_size = (int)numAct * 2 + 1;
+    nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{hash_size}, nv::DataType::Int32);
+    nv::Tensor hash_v = nv::Tensor::create(std::vector<int64_t>{hash_size}, nv::DataType::Int32);
     nv::Tensor indicePairs = nv::Tensor::create(std::vector<int64_t>{kernelVolume, numAct}, nv::DataType::Int32);
     indicePairs.fill<int32_t>(-1, stream);
     
@@ -56,38 +59,36 @@ getIndicePairsImplicitGemm(nv::Tensor indices,
     return {indices, indicePairs, pair_mask, mask_argsort, numActOut};
 
   } else {
+    // direct_table 分支 (参考 spconv 2.x): 线性哈希表取代 sort+unique+二分。
+    // stage1 把输出 voxel 1D 索引哈希插入(去重, 无需排序), unique_hash 收集表项并
+    // 赋输出id, stage2 O(1) 查表替代 find_in_hash_k 二分查找。见 indice.cu.h 说明。
     auto pair_size = kernelVolume * numAct;
-    nv::Tensor indice_pairs_uniq = nv::Tensor::create(std::vector<int64_t>{pair_size + 1}, nv::DataType::Int32);
+    // 哈希表大小: 不同输出 <= pair_size (每个 (kv,input) 至多贡献 1 个), 保证有空槽
+    int hash_size = (int)pair_size + 1;
+    nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{hash_size}, nv::DataType::Int32);
+    nv::Tensor hash_v = nv::Tensor::create(std::vector<int64_t>{hash_size}, nv::DataType::Int32);
+    nv::Tensor indice_pairs_uniq_bkp = nv::Tensor::create(std::vector<int64_t>{pair_size + 1}, nv::DataType::Int32);  // (kv,input)->输出索引
+    nv::Tensor indice_pairs_uniq = nv::Tensor::create(std::vector<int64_t>{pair_size + 1}, nv::DataType::Int32);      // 收集的 unique 输出索引
 
-    generate_conv_inds_mask_stage1(indices, indice_pairs_uniq, kernelSize, loc_iter, stream);
-    // stage2 依赖 stage1 的 (kv, 输入点) 原始布局。find_unique 现把排序结果写入
-    // scratch (见 indice.cu), 不再就地破坏 indice_pairs_uniq —— 备份实际已冗余,
-    // 暂保留作防御, 后续可移除省一次 DtoD 拷贝。
-    // 用异步 DtoD 拷贝代替 clone(): clone() 内部 cudaStreamSynchronize 会排空流水线
-    // (这是 stride 规则簿区间 ~120us 空洞的主要来源); 备份只被 stage2 在同一流上消费,
-    // 流序已保证其先于 sort+unique 完成, 无需 host 同步
-    nv::Tensor indice_pairs_uniq_backup =
-        nv::Tensor::create(indice_pairs_uniq.shape, indice_pairs_uniq.dtype(), indice_pairs_uniq.device());
-    indice_pairs_uniq_backup.copy_from_device(indice_pairs_uniq.ptr(), stream);
-    nv::Tensor indicePairUnique_new = find_unique_elements_cuda(indice_pairs_uniq, voxel_index_bits(outSpatialShape), stream);//挑出tensor中的独立不重复元素,并按照升序排列，indicePairUnique中保存的是vout即输出voxel grid的一维index
-    num_act_out = indicePairUnique_new.shape[0];
-    // clean_indices_uniq 用 INT_MAX 初始化整个数组(含 pair_size+1 多出的 1 个元素),
-    // sort+unique 后哨兵恒留在尾部且被计入 count —— 排除它, 否则多出 1 个
-    // 假输出 voxel (哨兵被 inverse 解码成垃圾坐标, 界内则污染输出, 越界则写坏内存)
-    if (num_act_out > 0) num_act_out -= 1;
+    // stage1: 哈希插入去重 + 填 (kv,input) 数组
+    generate_conv_inds_mask_stage1_direct_table(indices, hash_k, hash_v,
+        indice_pairs_uniq_bkp, kernelSize, loc_iter, stream);
 
-    nv::Tensor hash_k = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
-    nv::Tensor hash_v = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
-    hash_k.fill<int32_t>(std::numeric_limits<int32_t>::max(), stream);
+    // unique_hash: 收集表项 -> indice_pairs_uniq, 返回 num_act_out (内部 DtoH+同步)
+    num_act_out = unique_hash_table(hash_k, hash_v, indice_pairs_uniq, stream);
+
+    // 解码 unique 输出索引 -> out_inds 坐标
     nv::Tensor out_inds = nv::Tensor::create(std::vector<int64_t>{num_act_out, indices.shape[1]}, indices.dtype());
+    assign_output_direct_hash(out_inds, indice_pairs_uniq, num_act_out, loc_iter, stream);
+
     nv::Tensor indicePairs = nv::Tensor::create(std::vector<int64_t>{kernelVolume, num_act_out}, indices.dtype());
     indicePairs.fill<int32_t>(-1, stream);
     nv::Tensor pair_mask = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::UInt32);
     pair_mask.fill<uint32_t>(0, stream);
 
-    generate_conv_inds_mask_stage2(indices, hash_k, hash_v, indicePairs,
-        indicePairUnique_new, indice_pairs_uniq_backup,
-        out_inds, pair_mask, num_act_out, kernelSize, loc_iter, stream);
+    // stage2: O(1) 查表填 mask_fwd + indice_pairs_fwd
+    generate_conv_inds_stage2_mask_direct_table(indices, hash_k, hash_v,
+        indicePairs, indice_pairs_uniq_bkp, pair_mask, kernelSize, stream);
 
     nv::Tensor mask_argsort = nv::Tensor::create(std::vector<int64_t>{num_act_out}, nv::DataType::Int32);
     sort_1d_by_key_allocator_v2(pair_mask, mask_argsort, kernelVolume, stream);

@@ -557,6 +557,20 @@ void Tensor::fill(const T value, void* stream) {
   if (this->empty()) return;
 
   if (this->device()) {
+    // 值可表示为字节模式 (0x00/0xFF 等) 时走 cudaMemsetAsync: 热路径上所有 fill
+    // (indicePairs.fill(-1) / pair_mask.fill(0) / cnt.fill(0) / relu/dense 的 fill(0))
+    // 都满足, 用 thrust::fill 时实测每次调用后都会隐式 cudaStreamSynchronize,
+    // 打断推理流流水线 (单帧 29 次同步中 25 次由此产生)。同流串行下 memset 与
+    // thrust 语义等价, 但只入队一次 cudaMemsetAsync, 无同步、无 thrust 派发开销。
+    const unsigned char* v = reinterpret_cast<const unsigned char*>(&value);
+    bool byte_pattern = true;
+    for (size_t i = 1; i < sizeof(T); ++i) {
+      if (v[i] != v[0]) { byte_pattern = false; break; }
+    }
+    if (byte_pattern) {
+      checkRuntime(cudaMemsetAsync(this->ptr(), v[0], this->bytes(), (cudaStream_t)stream));
+      return;
+    }
     thrust::device_ptr<T> dev_ptr = thrust::device_pointer_cast(this->ptr<T>());
     thrust::fill(thrust::cuda::par.on((cudaStream_t)stream), dev_ptr, dev_ptr+this->numel, value);
   } else {

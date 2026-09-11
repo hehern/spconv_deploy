@@ -164,6 +164,9 @@ nv::Tensor find_unique_elements_cuda(nv::Tensor& src_tensor, int bits, void* str
   dilation: eg:{1, 1, 1}
   indice_pair_mask:nv::Tensor, shape:{numActIn}
 */
+// ===== generate_subm_conv_inds: 单 cooperative kernel 构建 subm 规则簿 =====
+// 见 indice.cu.h 的 calc_subm_conv_inds_coop_kernel。哈希 O(1) 查表替代排序+二分;
+// hash_k/v 由调用方按 >= 2*numActIn 分配 (哈希表, 负载<=0.5)。
 int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k,
                             nv::Tensor hashdata_v, nv::Tensor indice_pairs,
                             std::vector<int> input_dims, std::vector<int> ksize,
@@ -175,37 +178,31 @@ int generate_subm_conv_inds(nv::Tensor indices, nv::Tensor hashdata_k,
     return 0;
   }
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
-
   int kv = std::accumulate(ksize.begin(), ksize.end(), 1, std::multiplies<int>());
+  int RS_half = kv / 2 + 1;
 
-  int* indicesIn_ptr = indices.ptr<int>();//(batch,x,y,z)
-  int* hashdata_k_ptr = hashdata_k.ptr<int>();
-  int* hashdata_v_ptr = hashdata_v.ptr<int>();
-  int* indice_pairs_ptr = indice_pairs.ptr<int>();
-  int64_t NDim = ksize.size();//3
-  nv::Tensor ou = nv::Tensor::create(std::vector<int64_t>{NDim}, nv::DataType::Int32);//output_shape
-  checkRuntime(cudaMemcpyAsync(ou.ptr<int>(), input_dims.data(), input_dims.size()*sizeof(int), cudaMemcpyHostToDevice, (cudaStream_t)stream));
-  int* inSpatialShape_ptr = ou.ptr<int>();//size:xyz
-  
-  cuda_linear_launch(buildSubmConvHashTable, _stream, numActIn, indicesIn_ptr, hashdata_k_ptr, hashdata_v_ptr, inSpatialShape_ptr);//计算Hash_out：建立输出张量坐标(通过index表示)到输出序号之间的一张哈希表
-  // hash 表按 key 升序排序 (value 跟随), 使 calc_subm_conv_indices_mask 可用二分查找。
-  // 原实现为无序表 + 线性扫描, 查找复杂度 O(N^2 * RS) (subm2 层约 780 亿次比较/帧),
-  // 排序 + 二分后降为 O(N log N + N * RS * log N), 是 Lidar Backbone 的主要耗时来源。
-  // 限位基数排序 (只排 voxel 索引位数, 非 32 位), 备用缓冲走 best-fit 池。
-  radix_sort_pairs<int, int>(hashdata_k_ptr, hashdata_v_ptr, numActIn,
-                             voxel_index_bits(input_dims), stream);
-  // checkRuntime(cudaStreamSynchronize(_stream));
-  // std::cout << "buildSubmConvHashTable!" << std::endl;
-  uint32_t* indice_pair_mask_ptr = indice_pair_mask.ptr<uint32_t>();
-  cuda_linear_launch(fill_kernel<uint32_t>, _stream, numActIn, indice_pair_mask_ptr, 1 << (kv / 2));//每个active voxel都与kernel中心位置参与卷积，所以初始化1<<13
-  // checkRuntime(cudaStreamSynchronize(_stream));
-  // std::cout << "fill_kernel!" << std::endl;
-  dim3 __threads__(std::min(numActIn, 1024));
-  dim3 __blocks__(divup(numActIn, std::min(numActIn, 1024)), (kv / 2) + 1);
-  calc_subm_conv_indices_mask<<<__blocks__, __threads__, 0, _stream>>>(hashdata_k_ptr, hashdata_v_ptr, indicesIn_ptr,
-        indice_pairs_ptr, indice_pair_mask_ptr, numActIn, kv, (kv / 2) + 1, loc_iter);
-  // checkRuntime(cudaStreamSynchronize(_stream));
-  // std::cout << "calc_subm_conv_indices_mask!" << std::endl;
+  LinearHashTable<int,int> table{hashdata_k.ptr<int>(), hashdata_v.ptr<int>(), (int)hashdata_k.shape[0]};
+  const int* indices_in = indices.ptr<int>();
+  int32_t* pairs = indice_pairs.ptr<int32_t>();
+  uint32_t* mask = indice_pair_mask.ptr<uint32_t>();
+  int d0 = input_dims[0], d1 = input_dims[1], d2 = input_dims[2];
+
+  // cooperative launch 要求整个 grid 同时驻留: 按 SM 数 x 每 SM 可驻留 block 数定 grid
+  int threads = 256;
+  int device = 0;
+  checkRuntime(cudaGetDevice(&device));
+  int num_sms = 0;
+  checkRuntime(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, device));
+  int blocks_per_sm = 0;
+  checkRuntime(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &blocks_per_sm, calc_subm_conv_inds_coop_kernel, threads, 0));
+  int grid_blocks = std::max(1, num_sms * blocks_per_sm);
+
+  void* args[] = {(void*)&table, (void*)&indices_in, (void*)&pairs, (void*)&mask,
+                  (void*)&numActIn, (void*)&kv, (void*)&RS_half,
+                  (void*)&d0, (void*)&d1, (void*)&d2, (void*)&loc_iter};
+  checkRuntime(cudaLaunchCooperativeKernel((void*)calc_subm_conv_inds_coop_kernel,
+      dim3(grid_blocks), dim3(threads), (void**)args, 0, _stream));
   return indices.shape[0];
 }
 
@@ -294,6 +291,98 @@ int generate_conv_inds_mask_stage2(nv::Tensor indices,
     indice_pairs_uniq_before_sort_ptr, mask_fwd_ptr, num_act_in, num_out_act, kv, hashdata_k.shape[0]);
 
   return num_out_act;
+}
+
+// ===== direct_table (线性哈希表) 相关 host 包装 =====
+// 取代 sort+unique+二分: 见 indice.cu.h 的 LinearHashTable 与 kernel 说明。
+
+// stage1: 清哈希表(空key) + 清 (kv,input) 数组 + 插入去重
+void generate_conv_inds_mask_stage1_direct_table(nv::Tensor indices,
+                                                 nv::Tensor hash_k, nv::Tensor hash_v,
+                                                 nv::Tensor indice_pairs_uniq_bkp,
+                                                 std::vector<int> ksize,
+                                                 ConvOutLocIter& loc_iter,
+                                                 void* stream) {
+  int num_act_in = (int)indices.shape[0];
+  int kv = std::accumulate(ksize.begin(), ksize.end(), 1, std::multiplies<int>());
+  cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
+
+  int hash_size = (int)hash_k.shape[0];
+  cuda_linear_launch(clean_indices_uniq<int32_t>, _stream, hash_size, hash_k.ptr<int32_t>());
+  cuda_linear_launch(clean_indices_uniq<int32_t>, _stream, indice_pairs_uniq_bkp.shape[0], indice_pairs_uniq_bkp.ptr<int32_t>());
+
+  LinearHashTable<int,int> table{hash_k.ptr<int>(), hash_v.ptr<int>(), hash_size};
+  dim3 __threads__(std::min(num_act_in, 1024));
+  dim3 __blocks__(divup(num_act_in, std::min(num_act_in, 1024)), kv);
+  calc_conv_indices_stage1_mask_direct_table<<<__blocks__, __threads__, 0, _stream>>>(
+      table, indices.ptr<int>(), indice_pairs_uniq_bkp.ptr<int>(), num_act_in, kv, loc_iter);
+  checkRuntime(cudaGetLastError());
+}
+
+// unique_hash: 收集表项 -> indice_pairs_uniq (按输出id), 返回 num_act_out (host 读回)
+int unique_hash_table(nv::Tensor hash_k, nv::Tensor hash_v,
+                      nv::Tensor indice_pairs_uniq, void* stream) {
+  int hash_size = (int)hash_k.shape[0];
+  int limit = (int)indice_pairs_uniq.shape[0];
+  cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
+
+  nv::Tensor cnt = nv::Tensor::create(std::vector<int64_t>{1}, nv::DataType::Int32, true);
+  cnt.fill<int>(0, stream);
+  LinearHashTable<int,int> table{hash_k.ptr<int>(), hash_v.ptr<int>(), hash_size};
+  cuda_linear_launch(arange_hash_table_kernel, _stream, hash_size, table,
+                     indice_pairs_uniq.ptr<int>(), cnt.ptr<int>(), limit);
+  // 计数回读: 零拷贝 producer-consumer, 替代 to_host() 的 cudaMemcpyAsync +
+  // cudaStreamSynchronize (驱动唤醒 ~5-10us, 且语义上排空整条流)。
+  // 关键点: 发布用 设备端 publish 内核写 cudaHostAllocMapped 映射内存, host 侧
+  // 轮询版本号。host 从不写映射缓冲 (版本号由设备 cudaMemset 初始化 + 每次 publish
+  // 递增), 避免 CPU 缓存脏行导致设备写不可见 —— 之前用 cudaHostAllocPortable +
+  // DtoH memcpy + host 写 -1 哨兵自旋, 实测被卡住 ~300us (拷贝引擎的 DMA 写不会
+  // 及时失效 host 缓存的哨兵)。版本号单调递增, 也避免读到上一次的陈旧计数。
+  static PinnedCount* h_pc = nullptr;   // host 视图
+  static PinnedCount* d_pc = nullptr;   // device 视图 (UVA)
+  static int seq_ = 0;
+  if (h_pc == nullptr) {
+    checkRuntime(cudaHostAlloc(&h_pc, sizeof(PinnedCount), cudaHostAllocMapped));
+    checkRuntime(cudaHostGetDevicePointer(&d_pc, h_pc, 0));
+    checkRuntime(cudaMemset(d_pc, 0, sizeof(PinnedCount)));  // 设备初始化 version=0/count=0
+  }
+  int expect = ++seq_;  // 本次调用的版本号 (host 已知, 单调递增)
+  publish_count_kernel<<<1, 1, 0, _stream>>>(d_pc, cnt.ptr<int>(), expect);
+  while (*static_cast<volatile int*>(&h_pc->version) != expect) { /* 自旋等 publish 落定 */ }
+  int num_act_out = h_pc->count;
+  return num_act_out;
+}
+
+// 解码 unique 输出 1D 索引 -> out_inds 坐标
+void assign_output_direct_hash(nv::Tensor out_inds, nv::Tensor indice_pairs_uniq,
+                               int num_act_out, ConvOutLocIter& loc_iter,
+                               void* stream) {
+  cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
+  cuda_linear_launch(assign_out_indices_kernel, _stream, num_act_out,
+                     out_inds.ptr<int>(), indice_pairs_uniq.ptr<int>(), loc_iter);
+}
+
+// stage2: O(1) 查表填 mask_fwd + indice_pairs_fwd
+void generate_conv_inds_stage2_mask_direct_table(nv::Tensor indices,
+                                                 nv::Tensor hash_k, nv::Tensor hash_v,
+                                                 nv::Tensor indice_pairs,
+                                                 nv::Tensor indice_pairs_uniq_bkp,
+                                                 nv::Tensor mask_fwd,
+                                                 std::vector<int> ksize,
+                                                 void* stream) {
+  int num_act_in = (int)indices.shape[0];
+  int num_act_out = (int)mask_fwd.shape[0];
+  int kv = std::accumulate(ksize.begin(), ksize.end(), 1, std::multiplies<int>());
+  cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
+
+  int hash_size = (int)hash_k.shape[0];
+  LinearHashTable<int,int> table{hash_k.ptr<int>(), hash_v.ptr<int>(), hash_size};
+  dim3 __threads__(std::min(num_act_in, 1024));
+  dim3 __blocks__(divup(num_act_in, std::min(num_act_in, 1024)), kv);
+  calc_conv_indices_stage2_mask_direct_table<<<__blocks__, __threads__, 0, _stream>>>(
+      table, indice_pairs.ptr<int>(), indice_pairs_uniq_bkp.ptr<int>(),
+      mask_fwd.ptr<uint32_t>(), num_act_in, num_act_out, kv);
+  checkRuntime(cudaGetLastError());
 }
 
 } // namespace spconv

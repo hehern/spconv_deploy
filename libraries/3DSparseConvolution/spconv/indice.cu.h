@@ -19,6 +19,7 @@
 // #include <device_atomic_functions.hpp>
 #include <numeric>
 #include <limits>
+#include <cooperative_groups.h>
 #include "common/launch.cuh"
 #include "tensor.hpp"
 #include "conv/ConvOutLocIter.h"
@@ -111,6 +112,209 @@ __global__ void arange_kernel(size_t numActIn, T* data)   {
   int ix = cuda_linear_index;
   if (ix >= numActIn) return;
   data[ix] = T(ix);
+}
+
+// ===== direct_table (线性哈希表) 相关 =====
+// 取代 sort+unique+二分查找 构建 stride 规则簿:
+//   stage1 把输出 voxel 1D 索引哈希插入(原子CAS线性探测, 天然去重, 无需排序),
+//   unique_hash 收集表项并赋输出id, stage2 O(1) 查表 (替代 find_in_hash_k 二分)。
+// 参考 spconv 2.x 的 direct_table 分支 (LinearHashTableSplit + insert_key_only /
+// lookup_offset / arange_hash_table)。
+template <typename K = int, typename V = int>
+struct LinearHashTable {
+  K* key_ptr_;
+  V* value_ptr_;
+  int hash_size_;
+  static constexpr K empty_key = std::numeric_limits<K>::max();  // voxel 索引 < 类型最大值
+
+  __device__ int hash_slot(K key) const {
+    // 乘法散列 + 取模 (hash_size 非 2 幂); 插/查必须一致
+    unsigned int h = (unsigned int)key * 2654435761u;
+    return (int)(h % (unsigned int)hash_size_);
+  }
+  // 只插 key (去重): 成功(写入)或 key 已存在都算完成
+  __device__ void insert_key_only(K key) {
+    int slot = hash_slot(key);
+    unsigned int key_u = (unsigned int)key;
+    while (true) {
+      unsigned int prev = atomicCAS((unsigned int*)&key_ptr_[slot], (unsigned int)empty_key, key_u);
+      if (prev == (unsigned int)empty_key || prev == key_u) return;
+      slot = (slot + 1 == hash_size_) ? 0 : slot + 1;
+    }
+  }
+  // 插 key+value: 首个写入者生效 (key 已存在时本线程的 value 覆盖同值, 键唯一场景无影响)
+  __device__ void insert(K key, V value) {
+    int slot = hash_slot(key);
+    unsigned int key_u = (unsigned int)key;
+    while (true) {
+      unsigned int prev = atomicCAS((unsigned int*)&key_ptr_[slot], (unsigned int)empty_key, key_u);
+      if (prev == (unsigned int)empty_key || prev == key_u) {
+        value_ptr_[slot] = value;
+        return;
+      }
+      slot = (slot + 1 == hash_size_) ? 0 : slot + 1;
+    }
+  }
+  // 返回 key 所在槽, 不存在返回 -1 (O(1) 均摊)
+  __device__ int lookup_offset(K key) const {
+    int slot = hash_slot(key);
+    while (true) {
+      K k = key_ptr_[slot];
+      if (k == key) return slot;
+      if (k == empty_key) return -1;
+      slot = (slot + 1 == hash_size_) ? 0 : slot + 1;
+    }
+  }
+};
+
+// subm 路径使用的 uint 哈希表 (voxel 索引/值均为 unsigned)
+template <typename K, typename V>
+using HashTable = LinearHashTable<K, V>;
+
+// Conv3DProblem: 设备可拷贝的 conv 参数 (kernel 内据此构造 ConvOutLocIter)
+struct Conv3DProblem {
+  int ksize[3];
+  int stride[3];
+  int padding[3];
+  int dilation[3];
+  int output_dims[3];
+  int input_dims[3];
+};
+
+// stage1 direct_table: 计算输出 voxel 1D 索引 -> 哈希插入(去重) + 写入 (kv,input) 布局数组
+// (该数组即 stage2 的 "before_sort" 输入, 与旧 sort 方案的 indice_pairs_uniq 同布局)
+__global__ void calc_conv_indices_stage1_mask_direct_table(
+    LinearHashTable<int,int> table, const int* indices_in,
+    int* indice_pairs_for_uniq, int num_indices_in, int RS,
+    ConvOutLocIter loc_iter) {
+  int ix = cuda_2d_x;
+  int iy = cuda_2d_y;
+  if (ix >= num_indices_in || iy >= RS) return;
+  int filter_offset = blockIdx.y;
+  loc_iter.set_filter_offset(filter_offset);
+  int filter_offset_mul = filter_offset * num_indices_in;
+  int npq_offset[4];
+  if (loc_iter.query_npq(indices_in + ix * 4, npq_offset)) {
+    int index = loc_iter.layout_npq(npq_offset);
+    table.insert_key_only(index);  // 去重插入
+    indice_pairs_for_uniq[filter_offset_mul + ix] = index;
+  }
+}
+
+// unique_hash: 遍历表, 置位槽赋顺序输出id, 收集 key 到 out_indices_offset, count=总数
+// (表遍历序=任意序, 无需求升序 —— stage2 走哈希 O(1) 查找)
+__global__ void arange_hash_table_kernel(long num, LinearHashTable<int,int> table,
+                                         int* out_indices_offset, int* count, int limit) {
+  int i = cuda_linear_index;
+  if (i >= num) return;
+  int key = table.key_ptr_[i];
+  if (key != LinearHashTable<int,int>::empty_key) {
+    int output_index = atomicAdd(count, 1);
+    table.value_ptr_[i] = output_index < limit ? output_index : -1;
+    if (output_index < limit) out_indices_offset[output_index] = key;
+  }
+}
+
+// 映射 host 内存里的计数发布槽: 设备端 publish 内核写, host 侧只读轮询。
+// 语义见 unique_hash_table 的注释 (零拷贝 producer-consumer 模式)。
+struct PinnedCount { int version; int count; };
+
+// 发布计数到映射 host 内存 (cudaHostAllocMapped)。先写 count 并 __threadfence_system()
+// 保证对 host 可见, 再写 version; host 轮询到 version 变化即可安全读 count。
+__global__ void publish_count_kernel(PinnedCount* out, const int* src, int version) {
+  if (threadIdx.x == 0) {
+    out->count = *src;
+    __threadfence_system();
+    out->version = version;
+  }
+}
+
+// 把 unique 输出 1D 索引解码成 (batch,x,y,z) 坐标
+__global__ void assign_out_indices_kernel(long num, int* indices_out, const int* out_indices_offset,
+                                          ConvOutLocIter loc_iter) {
+  int i = cuda_linear_index;
+  if (i >= num) return;
+  loc_iter.inverse(out_indices_offset[i], indices_out + 4 * i);
+}
+
+// stage2 direct_table: O(1) 查表替代二分查找, 填 mask_fwd + indice_pairs_fwd
+__global__ void calc_conv_indices_stage2_mask_direct_table(
+    LinearHashTable<int,int> table, int* indice_pairs_fwd,
+    const int* indice_pairs_uniq_before_sort, uint32_t* mask_fwd,
+    int num_indices_in, int num_indices_out, int RS) {
+  int ix = cuda_2d_x;
+  int iy = cuda_2d_y;
+  if (ix >= num_indices_in || iy >= RS) return;
+  int filter_offset = blockIdx.y;
+  uint32_t filter_mask_fwd = (1u << (filter_offset % 32));
+  auto indice_pairs_filter = indice_pairs_fwd + filter_offset * num_indices_out;
+  auto bkp_filter = indice_pairs_uniq_before_sort + filter_offset * num_indices_in;
+  int output_coord_offset = bkp_filter[ix];
+  if (output_coord_offset != LinearHashTable<int,int>::empty_key) {
+    int table_offset = table.lookup_offset(output_coord_offset);
+    if (table_offset != -1) {
+      int output_index = table.value_ptr_[table_offset];
+      atomicOr(mask_fwd + output_index, filter_mask_fwd);
+      indice_pairs_filter[output_index] = ix;
+    }
+  }
+}
+
+// ===== subm 规则簿: 单 cooperative kernel (三阶段, 取代排序+二分) =====
+// 取代 buildSubmConvHashTable + radix sort_by_key + fill_kernel + calc_subm_conv_indices_mask:
+// 清表 -> grid.sync -> 建哈希(key=voxel 1D 索引, value=voxel id)+mask 初始化
+// -> grid.sync -> O(1) 查邻居填 mask/pairs (二分->哈希)。
+// 注意: 必须经 cudaLaunchCooperativeKernel 启动 (grid.sync 要求整 grid 驻留)。
+__global__ void calc_subm_conv_inds_coop_kernel(
+    LinearHashTable<int,int> table, const int* indices_in, int32_t* indice_pairs,
+    uint32_t* mask, int num_indices, int RS, int RS_half,
+    int d0, int d1, int d2, ConvOutLocIter loc_iter) {
+  namespace cg = cooperative_groups;
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int nthreads = gridDim.x * blockDim.x;
+
+  // Phase 0: 清哈希表 (池复用的块有脏数据, 必须清成空 key)
+  for (int i = tid; i < table.hash_size_; i += nthreads) {
+    table.key_ptr_[i] = LinearHashTable<int,int>::empty_key;
+  }
+  cg::this_grid().sync();
+
+  // Phase 1: 每 voxel 建哈希 (key=voxel 1D 索引, value=voxel id) + mask 初始化
+  for (int ix = tid; ix < num_indices; ix += nthreads) {
+    const int* idx = indices_in + ix * 4;  // (batch, x, y, z)
+    int index = (idx[1] * d1 + idx[2]) * d2 + idx[3];
+    table.insert(index, ix);
+    mask[ix] = 1u << (RS / 2);  // 中心 kernel 位 (与原 fill_kernel 的 1<<(kv/2) 一致)
+  }
+  cg::this_grid().sync();
+
+  // Phase 2: 每 (filter, voxel) O(1) 查表 (原 calc_subm_conv_indices_mask, 二分->哈希)
+  for (int filter_offset = 0; filter_offset < RS_half; ++filter_offset) {
+    uint32_t filter_mask_out = (1u << (filter_offset % 32));
+    uint32_t filter_mask_in = (1u << ((RS - 1 - filter_offset) % 32));
+    loc_iter.set_filter_offset(filter_offset);
+    int f_mul = filter_offset * num_indices;
+    int f_mul_1 = (RS - 1 - filter_offset) * num_indices;
+    bool is_center = (filter_offset == (RS / 2));
+    for (int ix = tid; ix < num_indices; ix += nthreads) {
+      if (is_center) {  // kernel 中心位置: 自己连自己
+        indice_pairs[f_mul + ix] = ix;
+        continue;
+      }
+      int nhw_offset[4];
+      if (loc_iter.query_nhw(indices_in + ix * 4, nhw_offset)) {  // 邻居坐标
+        auto offset = loc_iter.layout_npq(nhw_offset);             // 邻居 1D 索引
+        int table_offset = table.lookup_offset(offset);            // O(1) 查表
+        if (table_offset != -1) {
+          auto input_index = table.value_ptr_[table_offset];
+          atomicOr(mask + ix, filter_mask_out);
+          atomicOr(mask + input_index, filter_mask_in);
+          indice_pairs[f_mul + ix] = input_index;
+          indice_pairs[f_mul_1 + input_index] = ix;
+        }
+      }
+    }
+  }
 }
 
 template <typename T>
