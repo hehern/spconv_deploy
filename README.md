@@ -1,6 +1,6 @@
 # spconv_deploy
 
-This repo implements the BEVFusion LiDAR Sparse-Convolution (SCN) backbone as a **graph-structured sparse convolution inference engine**, based on [NVIDIA-bevfusion](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution). See [blog](https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501) for details.
+This repo implements the BEVFusion LiDAR Sparse-Convolution (SCN) backbone as a **graph-structured sparse convolution inference engine**, based on [NVIDIA-bevfusion](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution). See [blog](https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501) for details. The sparse convolution engine currently supports **fp16 only** (INT8 is not yet implemented).
 
 ## Core Implementation
 
@@ -28,7 +28,7 @@ Each `SparseConvolution` node works in two steps (`node_sparseconv.cpp`):
 
 ### Dependencies of the sparse convolution engine
 
-- **No TensorRT, no cuDNN, no CUTLASS** for the sparse convolution engine: the graph engine, rulebook kernels, gather/scatter kernels and the tensor-core GEMM (hand-written WMMA, used for all GEMM paths) are all pure CUDA (SM80+, fp16). Only the CUDA toolkit is required — the build does not reference CUTLASS at all.
+- **No TensorRT, no cuDNN, no CUTLASS** for the sparse convolution engine: the graph engine, rulebook kernels, gather/scatter kernels and the tensor-core GEMM (hand-written WMMA, used for all GEMM paths) are all pure CUDA (SM80+). Only the CUDA toolkit is required — the build does not reference CUTLASS at all.
 - Camera-side models (camera backbone, view transform, fusion, bbox head) in this BEVFusion repo still run on **TensorRT** engines — they are outside the sparse convolution engine.
 
 ### Performance optimizations
@@ -75,9 +75,7 @@ To build bevfusion, we need to depend on the following libraries:
 - [Compute Capability](https://developer.nvidia.com/cuda-gpus#compute) >= sm_80
 - Python >= 3.6
 
-Note: The sparse convolution engine itself only needs **CUDA (SM80+, fp16)** — TensorRT/CUDNN are required only for the camera-side models.
-
-The data in the performance table was obtained by us on the Nvidia Orin platform, using TensorRT-8.6, cuda-11.4 and cudnn8.6 statistics.
+Note: The sparse convolution engine itself only needs **CUDA (SM80+)** — TensorRT/CUDNN are required only for the camera-side models.
 
 ## Quick Start for Inference
 - note: Please use `git clone --recursive` to pull this repository to ensure the integrity of the dependencies.

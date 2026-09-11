@@ -1,6 +1,6 @@
 # spconv_deploy
 
-本仓库在 [NVIDIA-bevfusion](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution) 基础上，将 BEVFusion 的 LiDAR 稀疏卷积（SCN）骨干网络实现为**基于图结构的稀疏卷积推理引擎**。详见 [blog](https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501)。
+本仓库在 [NVIDIA-bevfusion](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution) 基础上，将 BEVFusion 的 LiDAR 稀疏卷积（SCN）骨干网络实现为**基于图结构的稀疏卷积推理引擎**。详见 [blog](https://blog.csdn.net/hehern/article/details/162737208?spm=1001.2014.3001.5501)。稀疏卷积引擎目前**仅支持 fp16**（INT8 尚未实现）。
 
 ## 核心实现
 
@@ -28,7 +28,7 @@
 
 ### 稀疏卷积引擎的依赖
 
-- 稀疏卷积引擎**不依赖 TensorRT、cuDNN、CUTLASS**：图引擎、rulebook kernel、gather/scatter kernel、tensor-core GEMM（手写 WMMA，覆盖所有 GEMM 路径）全部为纯 CUDA（SM80+，fp16），仅需 CUDA toolkit —— 构建过程完全不引用 CUTLASS。
+- 稀疏卷积引擎**不依赖 TensorRT、cuDNN、CUTLASS**：图引擎、rulebook kernel、gather/scatter kernel、tensor-core GEMM（手写 WMMA，覆盖所有 GEMM 路径）全部为纯 CUDA（SM80+），仅需 CUDA toolkit —— 构建过程完全不引用 CUTLASS。
 - 本 BEVFusion 仓库中的 camera 侧模型（camera backbone、view transform、fusion、bbox head）仍运行在 **TensorRT** 引擎上 —— 它们位于稀疏卷积引擎之外。
 
 ### 性能优化
@@ -75,9 +75,7 @@
 - [计算能力](https://developer.nvidia.com/cuda-gpus#compute) >= sm_80
 - Python >= 3.6
 
-注：稀疏卷积引擎本身只需要 **CUDA（SM80+，fp16）** —— TensorRT/CUDNN 仅用于 camera 侧模型。
-
-性能表中的数据由我们在 Nvidia Orin 平台上测得，使用 TensorRT-8.6、cuda-11.4 与 cudnn8.6。
+注：稀疏卷积引擎本身只需要 **CUDA（SM80+）** —— TensorRT/CUDNN 仅用于 camera 侧模型。
 
 ## 快速开始推理
 - 注意：请使用 `git clone --recursive` 拉取本仓库，确保依赖完整。
