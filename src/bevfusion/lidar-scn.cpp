@@ -21,6 +21,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 #include <cuda_runtime.h>
+#include <cuda_profiler_api.h>
 #include <cuda_fp16.h>
 #include "lidar-scn.hpp"
 #include "onnx-parser.hpp"
@@ -65,10 +66,15 @@ class SCNImplement : public SCN {
     // }
     // printf("--------\n");
     // printf("num_voxels = %d\n", voxelization_->num_voxels());
+    // 第 0 帧是调用方(main.cpp)的 warmup 帧，不启动 profiler，
+    // 保证 nsys profile 只统计非 warmup 帧 native_scn_->forward 的耗时
+    // const bool profile_this_frame = frame_++ > 0;
+    // if (profile_this_frame) cudaProfilerStart();
     native_scn_->forward(
       std::vector<int64_t>{voxelization_->num_voxels(), voxelization_->voxel_dim()}, nv::DataType::Float16,
       (void*)voxelization_->features(), std::vector<int64_t>{voxelization_->num_voxels(), voxelization_->indices_dim()},
       nv::DataType::Int32, (void*)voxelization_->indices(), voxelization_->grid_size(), stream);
+    // if (profile_this_frame) cudaProfilerStop();
 
     // std::cout << "onnx output size = " << native_scn_->num_output() << std::endl;
     // std::vector<int64_t> output0_shape = native_scn_->output(0)->features().shape;
@@ -114,6 +120,7 @@ class SCNImplement : public SCN {
   SCNParameter param_;
   std::shared_ptr<Voxelization> voxelization_;//体素化
   std::shared_ptr<spconv::Engine> native_scn_;//自定义的引擎（load onnx之后，手动构建的engine
+  unsigned int frame_ = 0;  // forward 调用帧计数，第 0 帧为 warmup 帧，不纳入 nsys 统计
 };
 
 std::shared_ptr<SCN> create_scn(const SCNParameter& param) {
