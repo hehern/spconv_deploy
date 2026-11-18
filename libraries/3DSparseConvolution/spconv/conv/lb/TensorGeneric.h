@@ -7,7 +7,7 @@ namespace conv {
 namespace lb {
 
 struct TensorGeneric {
-  std::array<int32_t, 2> strides;
+  std::array<int32_t, 2> strides;//{kernel_volume*C, C}
   TV_HOST_DEVICE_INLINE  TensorGeneric(std::array<int32_t, 2> const& strides) : strides(strides)  {
     
   }

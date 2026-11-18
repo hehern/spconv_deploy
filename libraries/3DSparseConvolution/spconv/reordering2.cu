@@ -62,10 +62,10 @@ void implicit_gemm_cuda(nv::Tensor features,
     int C_raw = features.size(1);
     int C_pad = (C_raw + kCAlign - 1) / kCAlign * kCAlign;
 
-    if (C_pad != C_raw) {
+    if (C_pad != C_raw) {// C 不对齐时, 重新分配内存并填充
         int numActIn_raw = features.size(0);
-        int K_raw = filters.size(0);
-        int kv_raw = filters.size(1);
+        int K_raw = filters.size(0);//eg:16
+        int kv_raw = filters.size(1);//eg:27
 
         // pad features: (numActIn, C_raw) -> (numActIn, C_pad)
         nv::Tensor features_pad = nv::Tensor::create(
@@ -148,7 +148,7 @@ void implicit_gemm_cuda(nv::Tensor features,
     // tile_shape = {64, 128, 32}, block = 128 threads, smem = 24576 bytes
     dim3 grid  = ker_params.grid_dims;//(numActOut/64, outchannels/128, 1)
     dim3 block(128);
-    int  smem_size = 24576;
+    int  smem_size = 24576;//24KB
 
     // 7. 设置共享内存属性 (>= 48KB 时需要)
     if (smem_size >= (48 << 10)) {//49152

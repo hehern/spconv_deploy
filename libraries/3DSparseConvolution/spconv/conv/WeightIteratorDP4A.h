@@ -27,31 +27,19 @@ struct WeightIteratorDP4A {
     // thread_offset = threadblock_offset + ThreadMap::initial_offset(thread_id)
     std::array<int, 2> thread_offset{threadblock_offset[0] + tmap_offset[0],
                                      threadblock_offset[1] + tmap_offset[1]};
-    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
-    #pragma unroll
-    for (int i = 0; i < 1; ++i) mask_[i] = 0;
+
+    mask_[0] = 0;
     // tnt(kForward): 归约维在 thread_offset[1] (C 方向), N 维在 thread_offset[0] (K 方向)
     reduce_channel_offset_ = thread_offset[1];
     reduce_channel_offset_backup_ = thread_offset[1];
     #pragma unroll
     for (int s = 0; s < 4; ++s){
-      #pragma unroll
-      for (int c = 0; c < 1; ++c){
-        #pragma unroll
-        for (int ss = 0; ss < 1; ++ss){
-          #pragma unroll
-          for (int v = 0; v < 1; ++v){
-            uint32_t pred = thread_offset[0] + s * 8 + ss < problem_size.K;
-            mask_[v] |= (pred << (s * 1 + c * 1 + ss));
-          }
-        }
-      }
+      uint32_t pred = thread_offset[0] + s * 8 < problem_size.K;
+      mask_[0] |= (pred << s);
     }
-    #pragma unroll
-    for (int v = 0; v < 1; ++v){
-        mask_[v] = thread_offset[1] + v * 8 >= problem_size.C ? 0 : mask_[v];
-    }
-    pointer_ += (thread_offset[0] * params.layout.strides[0] + thread_offset[1]) * 16 / 8;
+
+    mask_[0] = thread_offset[1] >= problem_size.C ? 0 : mask_[0];
+    pointer_ += (thread_offset[0] * params.layout.strides[0] + thread_offset[1]) * 16 / 8;//当前thread加载的权重起始地址，indice_k * (kernel_volume*C)+行offset，×2是因为weight是half类型
     mask_backup_ = mask_;
   }
   __forceinline__ __device__ void operator++()   {

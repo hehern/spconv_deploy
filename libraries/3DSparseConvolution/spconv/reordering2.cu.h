@@ -71,15 +71,15 @@ using cumm::conv::Output;
 __global__ void conv_kernel(ConvParams params) {
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
-    extern __shared__ uint8_t SharedStorage[];
+    extern __shared__ uint8_t SharedStorage[];//24KB
     auto gemm_shared_mem =
-        reinterpret_cast<BlockMmaStorage *>(SharedStorage);
+        reinterpret_cast<BlockMmaStorage *>(SharedStorage);//这里在gemm计算时候用
     auto out_shared_mem =
-        reinterpret_cast<OutputSmemStorage *>(SharedStorage);
+        reinterpret_cast<OutputSmemStorage *>(SharedStorage);//shared memory reuse,输出结果保存在这里
 
     // 1. Block/Thread 坐标
     int tile_offset_m = blockIdx.x;
-    int tile_offset_n = blockIdx.y;//0
+    int tile_offset_n = blockIdx.y;//0-outchannels/128
     int tile_offset_k = blockIdx.z;//0
     // printf("blockIdx.x: %d, blockIdx.y: %d, blockIdx.z: %d\n", blockIdx.x, blockIdx.y, blockIdx.z);
     if (tile_offset_m >= params.grid_dims.x ||
@@ -107,10 +107,10 @@ __global__ void conv_kernel(ConvParams params) {
 
     // 4. Warp/Thread 分解
     //    128 threads = 4 warps, 排列为 2(m) x 2(n)
-    int warp_idx = __shfl_sync(0xffffffff, threadIdx.x / 32, 0);
-    int lane_idx = threadIdx.x % 32;
-    int warp_mn = warp_idx % (2 * 2);
-    int warp_idx_k = warp_idx / (2 * 2);
+    int warp_idx = __shfl_sync(0xffffffff, threadIdx.x / 32, 0);//等价于threadIdx.x / 32，0-3
+    int lane_idx = threadIdx.x % 32;//0-31
+    int warp_mn = warp_idx % (2 * 2);//0-3
+    int warp_idx_k = warp_idx / (2 * 2);//0
     int warp_m = warp_mn % 2;
     int warp_n = warp_mn / 2;
 
@@ -122,7 +122,7 @@ __global__ void conv_kernel(ConvParams params) {
     for (int i = 0; i < 2; ++i) masks[i] = 0;
     #pragma unroll
     for (int i = 0; i < 2; ++i){
-        if (tile_offset_m * 64 + i * 32 + lane_idx < params.m){
+        if (tile_offset_m * 64 + i * 32 + lane_idx < params.m){//每个lane计算两个mask，4个warp 独立得到"全 block 的 kmask"，不需要 syncthreads
             masks[i] = params.mask_ptr[tile_offset_m * 64 + i * 32 + lane_idx];
         }
     }
@@ -130,7 +130,7 @@ __global__ void conv_kernel(ConvParams params) {
     for (int i = 0; i < 2; ++i){
         kmask |= masks[i];
     }
-    // Warp 级归约: 所有 lane 的 kmask 做 OR,由于前面每个lane计算两个不同warp的mask，所以这里做到了block级归约
+    // Warp 级归约: 所有 lane 的 kmask 做 OR, block级归约
     #pragma unroll
     for (int mask = 16; mask > 0; mask /= 2) {
         kmask |= __shfl_xor_sync(0xffffffff, kmask, mask, 32);

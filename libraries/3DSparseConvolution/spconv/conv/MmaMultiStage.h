@@ -989,19 +989,19 @@ struct MmaMultiStage {
   __forceinline__ __device__ void operator()(const int& gemm_k_iterations, std::array<half, 64>& accumulators, InputIteratorA & input_iter_A, InputIteratorB & input_iter_B, std::array<half, 64> const& src_accumulators, uint32_t mask, const int& RS)   {
 
     accumulators = src_accumulators;
-    std::array<half, 8> warp_frag_A[2];
+    std::array<half, 8> warp_frag_A[2];//双缓存，交替读写
     std::array<half, 16> warp_frag_B[2];
     WarpMma warp_mma;
     int smem_write_stage_idx = 1;
     int smem_read_stage_idx = 0;
     MaskIGemmIterator mask_iter(gemm_k_iterations, RS, mask);
     int local_gemm_k_iterations = gemm_k_iterations;
-    while(!mask_iter.valid()){
-        ++mask_iter;
-        input_iter_A.increment_filter();
-        input_iter_B.increment_filter();
+    while(!mask_iter.valid()){//查找mask中的第一个有效kv
+        ++mask_iter;//当前kv无效，移动一个位置
+        input_iter_A.increment_filter();//pair_fwd往后移动numActOut位置
+        input_iter_B.increment_filter();//权重filters移动C×2字节
     }
-    input_iter_A.update_indices();
+    input_iter_A.update_indices();//计算对应的输入特征数据地址
     #pragma unroll
     for (int stage=0; stage < 1; ++stage){
         AsyncCopyIterGlobalA::do_copy_zfill(input_iter_A, smem_iter_A);

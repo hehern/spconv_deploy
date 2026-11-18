@@ -18,7 +18,7 @@ struct ForwardDgradSparseIOIterator {
   SparseParams & params_;
   ConvProblem const& problem_;
   const char * pointer_;
-  int const* indice_ptr_;
+  int const* indice_ptr_;//pair_fwd
   int reduce_channel_offset_;
   int reduce_channel_offset_backup_;
   std::array<uint32_t, 1> mask_reset_backup_;
@@ -30,35 +30,28 @@ struct ForwardDgradSparseIOIterator {
     // thread_offset = threadblock_offset + ThreadMap::initial_offset(thread_id)
     std::array<int, 2> thread_offset{threadblock_offset[0] + tmap_offset[0],
                                      threadblock_offset[1] + tmap_offset[1]};
-    int stride_offset_ = thread_offset[0];
-    pointer_ = reinterpret_cast<const char *>(ptr + thread_offset[1]);
-    params.mask_argsort_ptr_ += stride_offset_;
-    // std::array::fill 是 __host__ 函数, 设备端用循环初始化
-    #pragma unroll
-    for (int i = 0; i < 1; ++i) mask_[i] = 0;
+    int stride_offset_ = thread_offset[0];//当前block对应的起始位置, 用于计算当前线程的起始位置
+    pointer_ = reinterpret_cast<const char *>(ptr + thread_offset[1]);//?
+    params.mask_argsort_ptr_ += stride_offset_;//当前thread对应的mask_argsort起始位置
+
+
+    mask_[0] = 0;
     reduce_channel_offset_ = thread_offset[1];
     reduce_channel_offset_backup_ = thread_offset[1];
     #pragma unroll
-    for (int s = 0; s < 2; ++s){
-        #pragma unroll
-        for (int ss = 0; ss < 1; ++ss){
-            #pragma unroll
-            for (int v = 0; v < 1; ++v){
-                uint32_t pred = (stride_offset_ + s * 8 + ss) < problem_.N;
-                mask_[v] |= (pred << (s * 1 + ss));
-            }
-        }
+    for (int s = 0; s < 2; ++s){//每个thread迭代两次
+      uint32_t pred = (stride_offset_ + s * 8) < problem_.N;//problem_.N为mask_argsort的长度, 即参与计算的输入特征个数
+      mask_[0] |= (pred << (s * 1));//eg:两个都在范围内为ox00000011,只有第一次迭代在范围内为ox00000001
     }
-    #pragma unroll
-    for (int v = 0; v < 1; ++v){
-        // 前向卷积: A 操作数是输入 features, 每行 C 个通道; 通道边界按 problem_.C 判断
-        mask_[v] = thread_offset[1] + v * 8 >= problem_.C ? 0 : mask_[v];
-    }
+
+    // 前向卷积: A 操作数是输入 features, 每行 C 个通道; 通道边界按 problem_.C 判断
+    mask_[0] = thread_offset[1] >= problem_.C ? 0 : mask_[0];
+  
     mask_reset_backup_ = mask_;
   }
   __forceinline__ __device__ void update_indices()   {
 
-    int mask_inds[2];
+    int mask_inds[2];//根据mask将当前thread负责的mask_argsort保存在mask_inds中
     uint32_t pred;
     pred = mask_[0] & (1u << (0 + 0));
     asm volatile (
@@ -88,7 +81,7 @@ struct ForwardDgradSparseIOIterator {
                 // 前向卷积: A 行偏移 = 输入voxel索引 * C(输入通道) * 2字节
                 indices_[s * 1 + ss] =
                 indice_ptr_[mask_inds[s * 1 + ss]] *
-                    problem_.C * 2 ;
+                    problem_.C * 2 ;//对应输入特征地址偏移量，indice_ptr_根据kv的偏移在前面increment_filter()中已经做过了
             }
         }
     }

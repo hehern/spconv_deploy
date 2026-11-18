@@ -16,11 +16,11 @@ struct PitchLinearWarpRaked {
         return {0, 0};        // to InputIter: inefficient but convenience dummy offset.
     int warp_id = (thread_id / 32);//0-3
     int lane_id = (thread_id % 32);//0-31
-    std::array<int, 2> warp_offset{warp_id / 1,
-                                warp_id % 1};
+    std::array<int, 2> warp_offset{warp_id / 1,//0-3
+                                warp_id % 1};//0
     constexpr std::array<int, 2> kWarpDilation{16, 4};
-    std::array<int, 2> thread_offset_in_warp{lane_id / 4,
-                                            lane_id % 4};
+    std::array<int, 2> thread_offset_in_warp{lane_id / 4,//0-7
+                                            lane_id % 4};//0-3
     std::array<int, 2> offset_in_tile;
     offset_in_tile[0] = kWarpDilation[0] * warp_offset[0] + thread_offset_in_warp[0];
     offset_in_tile[1] = kWarpDilation[1] * warp_offset[1] + thread_offset_in_warp[1];

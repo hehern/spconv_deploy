@@ -80,7 +80,7 @@ struct ConvParams {
     m = mnk[0];
     n = mnk[1];
     k = mnk[2];
-    gemm_k_iterations = problem.implicit_gemm_k_iterations(32);
+    gemm_k_iterations = problem.implicit_gemm_k_iterations(32);//C/32*kernel_volume
     #if !defined(__CUDACC_RTC__) && !defined(__NVCC__)
     assert(gemm_k_iterations % problem.kernel_volume == 0 && "error");
     #endif
